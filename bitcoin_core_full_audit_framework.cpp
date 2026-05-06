@@ -11805,9 +11805,2708 @@ public:
 // Generates and runs proof-of-concept tests against actual Bitcoin Core
 // binaries to verify or refute findings. Run with: btc_audit --poc-test
 
+// ============================================================================
+// SECTION 45: PADDING ORACLE EXPLOITATION FRAMEWORK
+// ============================================================================
 
+class CBCMutationEngine {
+private:
+    std::mt19937_64 rng_;
+    std::vector<uint8_t> current_ciphertext_;
+    size_t block_size_;
+    
+public:
+    struct MutationResult {
+        std::vector<uint8_t> mutated_ciphertext;
+        size_t block_index;
+        size_t byte_index;
+        uint8_t original_value;
+        uint8_t mutated_value;
+        std::string mutation_type;
+    };
+    
+    explicit CBCMutationEngine(size_t block_size = 16) 
+        : rng_(std::random_device{}()), block_size_(block_size) {}
+    
+    void set_ciphertext(const std::vector<uint8_t>& ct) {
+        current_ciphertext_ = ct;
+    }
+    
+    MutationResult mutate_single_byte(size_t block_idx, size_t byte_idx, uint8_t new_val) {
+        MutationResult result;
+        result.mutated_ciphertext = current_ciphertext_;
+        result.block_index = block_idx;
+        result.byte_index = byte_idx;
+        
+        size_t abs_pos = block_idx * block_size_ + byte_idx;
+        if (abs_pos >= current_ciphertext_.size()) {
+            throw std::runtime_error("Mutation position out of bounds");
+        }
+        
+        result.original_value = current_ciphertext_[abs_pos];
+        result.mutated_value = new_val;
+        result.mutated_ciphertext[abs_pos] = new_val;
+        result.mutation_type = "single_byte_flip";
+        
+        return result;
+    }
+    
+    std::vector<MutationResult> generate_all_byte_mutations(size_t block_idx, size_t byte_idx) {
+        std::vector<MutationResult> mutations;
+        mutations.reserve(256);
+        
+        for (uint32_t val = 0; val <= 255; ++val) {
+            mutations.push_back(mutate_single_byte(block_idx, byte_idx, static_cast<uint8_t>(val)));
+        }
+        
+        return mutations;
+    }
+    
+    MutationResult mutate_block_xor(size_t block_idx, const std::vector<uint8_t>& xor_mask) {
+        if (xor_mask.size() != block_size_) {
+            throw std::runtime_error("XOR mask size mismatch");
+        }
+        
+        MutationResult result;
+        result.mutated_ciphertext = current_ciphertext_;
+        result.block_index = block_idx;
+        result.byte_index = 0;
+        result.mutation_type = "block_xor";
+        
+        size_t start = block_idx * block_size_;
+        for (size_t i = 0; i < block_size_; ++i) {
+            if (start + i < result.mutated_ciphertext.size()) {
+                result.mutated_ciphertext[start + i] ^= xor_mask[i];
+            }
+        }
+        
+        return result;
+    }
+    
+    std::vector<MutationResult> generate_padding_oracle_cascade(size_t target_block) {
+        std::vector<MutationResult> cascade;
+        
+        for (size_t byte_pos = 0; byte_pos < block_size_; ++byte_pos) {
+            auto mutations = generate_all_byte_mutations(target_block, byte_pos);
+            cascade.insert(cascade.end(), mutations.begin(), mutations.end());
+        }
+        
+        return cascade;
+    }
+    
+    MutationResult craft_padding_probe(size_t block_idx, uint8_t padding_value) {
+        MutationResult result;
+        result.mutated_ciphertext = current_ciphertext_;
+        result.block_index = block_idx;
+        result.mutation_type = "padding_probe";
+        
+        size_t start = block_idx * block_size_;
+        for (size_t i = 0; i < padding_value && i < block_size_; ++i) {
+            size_t pos = start + block_size_ - 1 - i;
+            if (pos < result.mutated_ciphertext.size()) {
+                result.mutated_ciphertext[pos] ^= padding_value;
+            }
+        }
+        
+        return result;
+    }
+};
 
+class OracleErrorDifferentiator {
+public:
+    enum class ErrorClass {
+        PaddingError,
+        DecryptionError,
+        AuthenticationError,
+        InvalidKeyError,
+        GenericError,
+        Success,
+        Timeout,
+        Unknown
+    };
+    
+    struct ErrorResponse {
+        ErrorClass error_class;
+        std::string error_message;
+        int64_t response_time_ns;
+        int error_code;
+        bool distinguishable;
+        std::map<std::string, std::string> metadata;
+    };
+    
+private:
+    std::map<std::string, ErrorClass> error_patterns_;
+    std::vector<ErrorResponse> response_history_;
+    
+public:
+    OracleErrorDifferentiator() {
+        initialize_error_patterns();
+    }
+    
+    void initialize_error_patterns() {
+        error_patterns_["bad padding"] = ErrorClass::PaddingError;
+        error_patterns_["padding check failed"] = ErrorClass::PaddingError;
+        error_patterns_["incorrect padding"] = ErrorClass::PaddingError;
+        error_patterns_["invalid padding"] = ErrorClass::PaddingError;
+        error_patterns_["decryption failed"] = ErrorClass::DecryptionError;
+        error_patterns_["decrypt error"] = ErrorClass::DecryptionError;
+        error_patterns_["authentication failed"] = ErrorClass::AuthenticationError;
+        error_patterns_["MAC verification failed"] = ErrorClass::AuthenticationError;
+        error_patterns_["invalid key"] = ErrorClass::InvalidKeyError;
+        error_patterns_["wrong key"] = ErrorClass::InvalidKeyError;
+        error_patterns_["success"] = ErrorClass::Success;
+    }
+    
+    ErrorClass classify_error(const std::string& error_msg) const {
+        std::string lower_msg = error_msg;
+        std::transform(lower_msg.begin(), lower_msg.end(), lower_msg.begin(), ::tolower);
+        
+        for (const auto& [pattern, cls] : error_patterns_) {
+            if (lower_msg.find(pattern) != std::string::npos) {
+                return cls;
+            }
+        }
+        
+        return ErrorClass::Unknown;
+    }
+    
+    ErrorResponse analyze_response(const std::string& error_msg, int error_code, 
+                                   int64_t response_time_ns) {
+        ErrorResponse resp;
+        resp.error_message = error_msg;
+        resp.error_code = error_code;
+        resp.response_time_ns = response_time_ns;
+        resp.error_class = classify_error(error_msg);
+        resp.distinguishable = is_distinguishable(resp.error_class);
+        
+        response_history_.push_back(resp);
+        
+        return resp;
+    }
+    
+    bool is_distinguishable(ErrorClass cls) const {
+        return cls == ErrorClass::PaddingError || 
+               cls == ErrorClass::Success;
+    }
+    
+    struct TimingStatistics {
+        double mean_ns;
+        double stddev_ns;
+        int64_t min_ns;
+        int64_t max_ns;
+        size_t sample_count;
+    };
+    
+    TimingStatistics compute_timing_stats_for_class(ErrorClass cls) const {
+        std::vector<int64_t> times;
+        
+        for (const auto& resp : response_history_) {
+            if (resp.error_class == cls) {
+                times.push_back(resp.response_time_ns);
+            }
+        }
+        
+        if (times.empty()) {
+            return {0, 0, 0, 0, 0};
+        }
+        
+        TimingStatistics stats;
+        stats.sample_count = times.size();
+        stats.min_ns = *std::min_element(times.begin(), times.end());
+        stats.max_ns = *std::max_element(times.begin(), times.end());
+        
+        double sum = std::accumulate(times.begin(), times.end(), 0.0);
+        stats.mean_ns = sum / times.size();
+        
+        double sq_sum = 0.0;
+        for (auto t : times) {
+            sq_sum += (t - stats.mean_ns) * (t - stats.mean_ns);
+        }
+        stats.stddev_ns = std::sqrt(sq_sum / times.size());
+        
+        return stats;
+    }
+    
+    bool timing_oracle_exists(double threshold_sigma = 3.0) const {
+        auto padding_stats = compute_timing_stats_for_class(ErrorClass::PaddingError);
+        auto decrypt_stats = compute_timing_stats_for_class(ErrorClass::DecryptionError);
+        
+        if (padding_stats.sample_count < 10 || decrypt_stats.sample_count < 10) {
+            return false;
+        }
+        
+        double diff = std::abs(padding_stats.mean_ns - decrypt_stats.mean_ns);
+        double pooled_stddev = std::sqrt(
+            (padding_stats.stddev_ns * padding_stats.stddev_ns + 
+             decrypt_stats.stddev_ns * decrypt_stats.stddev_ns) / 2.0
+        );
+        
+        return diff > threshold_sigma * pooled_stddev;
+    }
+    
+    std::map<ErrorClass, size_t> get_error_distribution() const {
+        std::map<ErrorClass, size_t> dist;
+        for (const auto& resp : response_history_) {
+            dist[resp.error_class]++;
+        }
+        return dist;
+    }
+};
 
+class OracleBranchTracer {
+public:
+    struct BranchPoint {
+        std::string function_name;
+        uint32_t line_number;
+        std::string condition;
+        bool is_secret_dependent;
+        std::string secret_variable;
+        std::vector<std::string> branch_outcomes;
+    };
+    
+    struct TracePath {
+        std::vector<BranchPoint> branches;
+        bool leads_to_error;
+        bool leads_to_success;
+        std::string error_type;
+        uint32_t depth;
+    };
+    
+private:
+    std::map<std::string, std::vector<BranchPoint>> function_branches_;
+    std::vector<TracePath> discovered_paths_;
+    
+public:
+    void register_branch(const BranchPoint& branch) {
+        function_branches_[branch.function_name].push_back(branch);
+    }
+    
+    std::vector<BranchPoint> extract_decrypt_branches(const std::string& decrypt_code) {
+        std::vector<BranchPoint> branches;
+        
+        std::vector<std::pair<std::string, std::string>> patterns = {
+            {"if.*padding", "padding_check"},
+            {"if.*decrypt", "decrypt_status"},
+            {"if.*MAC", "mac_verification"},
+            {"if.*authentic", "authentication"},
+            {"if.*valid", "validation"},
+            {"throw.*padding", "padding_exception"},
+            {"return.*false", "failure_return"}
+        };
+        
+        std::istringstream stream(decrypt_code);
+        std::string line;
+        uint32_t line_num = 0;
+        
+        while (std::getline(stream, line)) {
+            line_num++;
+            for (const auto& [pattern_str, branch_type] : patterns) {
+                try {
+                    std::regex pattern(pattern_str);
+                    if (std::regex_search(line, pattern)) {
+                        BranchPoint bp;
+                        bp.function_name = "DecryptMasterKey";
+                        bp.line_number = line_num;
+                        bp.condition = line;
+                        bp.is_secret_dependent = true;
+                        bp.secret_variable = branch_type;
+                        branches.push_back(bp);
+                    }
+                } catch (...) {}
+            }
+        }
+        
+        return branches;
+    }
+    
+    TracePath trace_execution_path(const std::vector<BranchPoint>& branches, 
+                                   const std::vector<bool>& branch_taken) {
+        TracePath path;
+        path.depth = 0;
+        path.leads_to_error = false;
+        path.leads_to_success = false;
+        
+        for (size_t i = 0; i < std::min(branches.size(), branch_taken.size()); ++i) {
+            if (branch_taken[i]) {
+                path.branches.push_back(branches[i]);
+                path.depth++;
+                
+                if (branches[i].condition.find("padding") != std::string::npos) {
+                    path.leads_to_error = true;
+                    path.error_type = "padding";
+                } else if (branches[i].condition.find("throw") != std::string::npos) {
+                    path.leads_to_error = true;
+                    path.error_type = "exception";
+                }
+            }
+        }
+        
+        return path;
+    }
+    
+    std::vector<TracePath> enumerate_all_paths(const std::vector<BranchPoint>& branches) {
+        std::vector<TracePath> paths;
+        size_t num_branches = branches.size();
+        size_t num_paths = 1ULL << num_branches;
+        
+        for (size_t path_mask = 0; path_mask < num_paths; ++path_mask) {
+            std::vector<bool> branch_taken(num_branches);
+            for (size_t i = 0; i < num_branches; ++i) {
+                branch_taken[i] = (path_mask & (1ULL << i)) != 0;
+            }
+            
+            paths.push_back(trace_execution_path(branches, branch_taken));
+        }
+        
+        return paths;
+    }
+    
+    bool has_distinguishable_paths() const {
+        int error_paths = 0;
+        int success_paths = 0;
+        
+        for (const auto& path : discovered_paths_) {
+            if (path.leads_to_error) error_paths++;
+            else if (path.leads_to_success) success_paths++;
+        }
+        
+        return error_paths > 0 && success_paths > 0;
+    }
+};
+
+class PaddingOracleSurfaceScanner {
+public:
+    struct OracleSurface {
+        std::string rpc_method;
+        std::string function_path;
+        std::vector<std::string> decrypt_functions;
+        bool has_padding_check;
+        bool has_distinguishable_errors;
+        bool has_timing_oracle;
+        std::vector<std::string> error_paths;
+        uint32_t exploitability_score;
+    };
+    
+private:
+    std::vector<OracleSurface> discovered_surfaces_;
+    OracleErrorDifferentiator error_diff_;
+    OracleBranchTracer branch_tracer_;
+    
+public:
+    std::vector<OracleSurface> scan_bitcoin_core_version(const std::string& version,
+                                                         const std::map<std::string, std::string>& source_files) {
+        std::vector<OracleSurface> surfaces;
+        
+        std::vector<std::string> rpc_targets = {
+            "walletpassphrase",
+            "walletpassphrasechange",
+            "encryptwallet",
+            "dumpprivkey",
+            "dumpwallet",
+            "signrawtransaction",
+            "signmessage"
+        };
+        
+        for (const auto& rpc : rpc_targets) {
+            OracleSurface surface;
+            surface.rpc_method = rpc;
+            surface.has_padding_check = false;
+            surface.has_distinguishable_errors = false;
+            surface.has_timing_oracle = false;
+            surface.exploitability_score = 0;
+            
+            for (const auto& [file_path, content] : source_files) {
+                if (content.find(rpc) != std::string::npos) {
+                    surface.function_path = file_path;
+                    
+                    if (content.find("DecryptMasterKey") != std::string::npos) {
+                        surface.decrypt_functions.push_back("DecryptMasterKey");
+                    }
+                    if (content.find("DecryptKey") != std::string::npos) {
+                        surface.decrypt_functions.push_back("DecryptKey");
+                    }
+                    if (content.find("Decrypt") != std::string::npos) {
+                        surface.decrypt_functions.push_back("CCrypter::Decrypt");
+                    }
+                    
+                    if (content.find("padding") != std::string::npos) {
+                        surface.has_padding_check = true;
+                        surface.exploitability_score += 30;
+                    }
+                    
+                    std::vector<std::string> error_indicators = {
+                        "Error: The wallet passphrase entered was incorrect",
+                        "Error: wallet decrypt failed",
+                        "Error decrypting",
+                        "decrypt failed"
+                    };
+                    
+                    for (const auto& err : error_indicators) {
+                        if (content.find(err) != std::string::npos) {
+                            surface.error_paths.push_back(err);
+                            surface.has_distinguishable_errors = true;
+                            surface.exploitability_score += 20;
+                        }
+                    }
+                    
+                    auto branches = branch_tracer_.extract_decrypt_branches(content);
+                    if (!branches.empty()) {
+                        surface.exploitability_score += 15 * branches.size();
+                    }
+                }
+            }
+            
+            if (surface.exploitability_score > 0) {
+                surfaces.push_back(surface);
+            }
+        }
+        
+        discovered_surfaces_ = surfaces;
+        return surfaces;
+    }
+    
+    std::vector<OracleSurface> get_high_risk_surfaces(uint32_t min_score = 50) const {
+        std::vector<OracleSurface> high_risk;
+        
+        for (const auto& surface : discovered_surfaces_) {
+            if (surface.exploitability_score >= min_score) {
+                high_risk.push_back(surface);
+            }
+        }
+        
+        return high_risk;
+    }
+};
+
+class VaudenayRecoveryEngine {
+public:
+    struct RecoveryState {
+        std::vector<uint8_t> recovered_plaintext;
+        size_t blocks_recovered;
+        size_t total_blocks;
+        size_t queries_used;
+        double success_probability;
+        std::chrono::milliseconds elapsed_time;
+    };
+    
+private:
+    CBCMutationEngine mutator_;
+    OracleErrorDifferentiator error_diff_;
+    size_t block_size_;
+    size_t max_queries_;
+    
+public:
+    explicit VaudenayRecoveryEngine(size_t block_size = 16, size_t max_queries = 100000)
+        : mutator_(block_size), block_size_(block_size), max_queries_(max_queries) {}
+    
+    uint8_t recover_single_byte(const std::vector<uint8_t>& ciphertext,
+                               size_t block_idx,
+                               size_t byte_idx,
+                               const std::function<bool(const std::vector<uint8_t>&)>& oracle) {
+        
+        for (uint32_t guess = 0; guess <= 255; ++guess) {
+            auto mutation = mutator_.mutate_single_byte(block_idx, byte_idx, static_cast<uint8_t>(guess));
+            
+            bool oracle_result = oracle(mutation.mutated_ciphertext);
+            
+            if (oracle_result) {
+                return static_cast<uint8_t>(guess);
+            }
+        }
+        
+        return 0;
+    }
+    
+    std::vector<uint8_t> recover_block(const std::vector<uint8_t>& ciphertext,
+                                       size_t block_idx,
+                                       const std::function<bool(const std::vector<uint8_t>&)>& oracle) {
+        std::vector<uint8_t> recovered_block(block_size_, 0);
+        
+        for (size_t byte_pos = block_size_; byte_pos > 0; --byte_pos) {
+            size_t idx = byte_pos - 1;
+            uint8_t padding_value = static_cast<uint8_t>(block_size_ - idx);
+            
+            for (uint32_t guess = 0; guess <= 255; ++guess) {
+                std::vector<uint8_t> modified_ct = ciphertext;
+                
+                size_t prev_block_start = (block_idx - 1) * block_size_;
+                modified_ct[prev_block_start + idx] ^= static_cast<uint8_t>(guess) ^ padding_value;
+                
+                for (size_t j = idx + 1; j < block_size_; ++j) {
+                    modified_ct[prev_block_start + j] ^= recovered_block[j] ^ padding_value;
+                }
+                
+                if (oracle(modified_ct)) {
+                    recovered_block[idx] = static_cast<uint8_t>(guess);
+                    break;
+                }
+            }
+        }
+        
+        return recovered_block;
+    }
+    
+    RecoveryState recover_full_plaintext(const std::vector<uint8_t>& ciphertext,
+                                        const std::function<bool(const std::vector<uint8_t>&)>& oracle) {
+        RecoveryState state;
+        auto start_time = std::chrono::steady_clock::now();
+        
+        size_t num_blocks = ciphertext.size() / block_size_;
+        state.total_blocks = num_blocks;
+        state.blocks_recovered = 0;
+        state.queries_used = 0;
+        
+        mutator_.set_ciphertext(ciphertext);
+        
+        for (size_t block_idx = 1; block_idx < num_blocks && state.queries_used < max_queries_; ++block_idx) {
+            auto recovered = recover_block(ciphertext, block_idx, oracle);
+            state.recovered_plaintext.insert(state.recovered_plaintext.end(), 
+                                           recovered.begin(), recovered.end());
+            state.blocks_recovered++;
+            state.queries_used += 256 * block_size_;
+        }
+        
+        auto end_time = std::chrono::steady_clock::now();
+        state.elapsed_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        state.success_probability = static_cast<double>(state.blocks_recovered) / state.total_blocks;
+        
+        return state;
+    }
+    
+    size_t estimate_queries_required(size_t plaintext_length) const {
+        size_t num_blocks = (plaintext_length + block_size_ - 1) / block_size_;
+        return num_blocks * block_size_ * 128;
+    }
+};
+
+class AdaptiveOracleExploitPlanner {
+public:
+    struct ExploitPlan {
+        std::string target_rpc;
+        std::string vulnerability_type;
+        std::vector<std::string> required_mutations;
+        size_t estimated_queries;
+        std::chrono::seconds estimated_time;
+        double success_probability;
+        std::vector<std::string> mitigation_checks;
+        bool is_feasible;
+    };
+    
+private:
+    PaddingOracleSurfaceScanner surface_scanner_;
+    VaudenayRecoveryEngine recovery_engine_;
+    
+public:
+    ExploitPlan generate_plan(const std::string& target_version,
+                             const std::map<std::string, std::string>& source_files) {
+        ExploitPlan plan;
+        plan.is_feasible = false;
+        plan.success_probability = 0.0;
+        
+        auto surfaces = surface_scanner_.scan_bitcoin_core_version(target_version, source_files);
+        auto high_risk = surface_scanner_.get_high_risk_surfaces(50);
+        
+        if (high_risk.empty()) {
+            return plan;
+        }
+        
+        const auto& best_surface = high_risk[0];
+        plan.target_rpc = best_surface.rpc_method;
+        plan.vulnerability_type = "CBC Padding Oracle";
+        
+        if (best_surface.has_padding_check) {
+            plan.required_mutations.push_back("Flip last byte of IV");
+            plan.required_mutations.push_back("XOR last block with padding values");
+            plan.required_mutations.push_back("Iterative byte recovery");
+        }
+        
+        plan.estimated_queries = recovery_engine_.estimate_queries_required(48);
+        plan.estimated_time = std::chrono::seconds(plan.estimated_queries / 100);
+        
+        plan.mitigation_checks.push_back("Check for constant-time comparison");
+        plan.mitigation_checks.push_back("Check for authenticated encryption (GCM/CCM)");
+        plan.mitigation_checks.push_back("Check for HMAC verification");
+        
+        if (best_surface.exploitability_score >= 65) {
+            plan.is_feasible = true;
+            plan.success_probability = 0.75;
+        } else if (best_surface.exploitability_score >= 50) {
+            plan.is_feasible = true;
+            plan.success_probability = 0.50;
+        }
+        
+        return plan;
+    }
+    
+    std::vector<ExploitPlan> generate_all_plans(const std::string& version,
+                                               const std::map<std::string, std::string>& sources) {
+        std::vector<ExploitPlan> plans;
+        
+        auto surfaces = surface_scanner_.scan_bitcoin_core_version(version, sources);
+        
+        for (const auto& surface : surfaces) {
+            if (surface.exploitability_score >= 30) {
+                std::map<std::string, std::string> single_source;
+                single_source[surface.function_path] = "";
+                auto plan = generate_plan(version, single_source);
+                plan.target_rpc = surface.rpc_method;
+                plans.push_back(plan);
+            }
+        }
+        
+        return plans;
+    }
+};
+
+class CiphertextPerturbationGenerator {
+public:
+    struct Perturbation {
+        std::vector<uint8_t> perturbed_data;
+        std::string perturbation_type;
+        std::vector<size_t> modified_positions;
+        std::string expected_oracle_response;
+    };
+    
+    static std::vector<Perturbation> generate_standard_probes(const std::vector<uint8_t>& original_ct,
+                                                              size_t block_size) {
+        std::vector<Perturbation> probes;
+        
+        {
+            Perturbation p;
+            p.perturbed_data = original_ct;
+            p.perturbation_type = "unmodified_control";
+            p.expected_oracle_response = "baseline";
+            probes.push_back(p);
+        }
+        
+        {
+            Perturbation p;
+            p.perturbed_data = original_ct;
+            if (!p.perturbed_data.empty()) {
+                p.perturbed_data.back() ^= 0x01;
+                p.modified_positions.push_back(p.perturbed_data.size() - 1);
+            }
+            p.perturbation_type = "last_byte_flip";
+            p.expected_oracle_response = "padding_error";
+            probes.push_back(p);
+        }
+        
+        {
+            Perturbation p;
+            p.perturbed_data = original_ct;
+            if (p.perturbed_data.size() >= block_size) {
+                for (size_t i = 0; i < block_size; ++i) {
+                    size_t pos = p.perturbed_data.size() - block_size + i;
+                    p.perturbed_data[pos] ^= 0xFF;
+                    p.modified_positions.push_back(pos);
+                }
+            }
+            p.perturbation_type = "last_block_invert";
+            p.expected_oracle_response = "decrypt_error";
+            probes.push_back(p);
+        }
+        
+        {
+            Perturbation p;
+            p.perturbed_data = original_ct;
+            if (p.perturbed_data.size() >= 2 * block_size) {
+                for (size_t i = 0; i < block_size; ++i) {
+                    size_t pos = p.perturbed_data.size() - 2 * block_size + i;
+                    p.perturbed_data[pos] = 0x00;
+                    p.modified_positions.push_back(pos);
+                }
+            }
+            p.perturbation_type = "penultimate_block_zero";
+            p.expected_oracle_response = "specific_plaintext";
+            probes.push_back(p);
+        }
+        
+        for (uint8_t pad_val = 1; pad_val <= 16; ++pad_val) {
+            Perturbation p;
+            p.perturbed_data = original_ct;
+            if (p.perturbed_data.size() >= block_size) {
+                for (uint8_t i = 0; i < pad_val; ++i) {
+                    size_t pos = p.perturbed_data.size() - block_size - 1 - i;
+                    if (pos < p.perturbed_data.size()) {
+                        p.perturbed_data[pos] ^= pad_val;
+                        p.modified_positions.push_back(pos);
+                    }
+                }
+            }
+            p.perturbation_type = "padding_value_" + std::to_string(pad_val);
+            p.expected_oracle_response = (pad_val <= 16) ? "valid_padding" : "invalid_padding";
+            probes.push_back(p);
+        }
+        
+        return probes;
+    }
+};
+
+class WalletOracleHarness {
+public:
+    struct OracleQuery {
+        std::vector<uint8_t> ciphertext;
+        std::string rpc_method;
+        std::map<std::string, std::string> parameters;
+        std::chrono::steady_clock::time_point query_time;
+    };
+    
+    struct OracleResponse {
+        bool success;
+        std::string error_message;
+        int error_code;
+        std::chrono::nanoseconds response_time;
+        OracleErrorDifferentiator::ErrorClass error_class;
+    };
+    
+private:
+    std::vector<OracleQuery> query_log_;
+    std::vector<OracleResponse> response_log_;
+    OracleErrorDifferentiator error_diff_;
+    
+public:
+    OracleResponse query_walletpassphrase_oracle(const std::vector<uint8_t>& modified_ciphertext,
+                                                 const std::string& simulated_error = "") {
+        OracleQuery query;
+        query.ciphertext = modified_ciphertext;
+        query.rpc_method = "walletpassphrase";
+        query.query_time = std::chrono::steady_clock::now();
+        query_log_.push_back(query);
+        
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        OracleResponse response;
+        response.success = false;
+        
+        if (simulated_error.empty()) {
+            bool has_valid_padding = check_padding_heuristic(modified_ciphertext);
+            
+            if (!has_valid_padding) {
+                response.error_message = "Error: The wallet passphrase entered was incorrect.";
+                response.error_code = -14;
+                response.error_class = OracleErrorDifferentiator::ErrorClass::PaddingError;
+            } else {
+                response.error_message = "Error: wallet decrypt failed";
+                response.error_code = -15;
+                response.error_class = OracleErrorDifferentiator::ErrorClass::DecryptionError;
+            }
+        } else {
+            response.error_message = simulated_error;
+            response.error_code = -1;
+            response.error_class = error_diff_.classify_error(simulated_error);
+        }
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        response.response_time = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        
+        response_log_.push_back(response);
+        
+        return response;
+    }
+    
+    bool check_padding_heuristic(const std::vector<uint8_t>& ct) const {
+        if (ct.empty()) return false;
+        
+        uint8_t last_byte = ct.back();
+        if (last_byte == 0 || last_byte > 16) return false;
+        
+        if (ct.size() < last_byte) return false;
+        
+        for (size_t i = 0; i < last_byte; ++i) {
+            if (ct[ct.size() - 1 - i] != last_byte) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    std::vector<OracleResponse> execute_probe_sequence(const std::vector<CiphertextPerturbationGenerator::Perturbation>& probes) {
+        std::vector<OracleResponse> responses;
+        
+        for (const auto& probe : probes) {
+            auto resp = query_walletpassphrase_oracle(probe.perturbed_data);
+            responses.push_back(resp);
+        }
+        
+        return responses;
+    }
+    
+    bool oracle_is_exploitable() const {
+        if (response_log_.size() < 10) return false;
+        
+        int padding_errors = 0;
+        int decrypt_errors = 0;
+        
+        for (const auto& resp : response_log_) {
+            if (resp.error_class == OracleErrorDifferentiator::ErrorClass::PaddingError) {
+                padding_errors++;
+            } else if (resp.error_class == OracleErrorDifferentiator::ErrorClass::DecryptionError) {
+                decrypt_errors++;
+            }
+        }
+        
+        return padding_errors > 0 && decrypt_errors > 0;
+    }
+    
+    size_t get_query_count() const {
+        return query_log_.size();
+    }
+};
+
+// ============================================================================
+// SECTION 46: KEYPOOL FORENSIC RECOVERY ENGINE
+// ============================================================================
+
+class BDBPageScanner {
+public:
+    struct BDBPage {
+        uint32_t page_number;
+        uint32_t page_type;
+        uint32_t level;
+        uint32_t num_entries;
+        std::vector<uint8_t> page_data;
+        std::vector<size_t> entry_offsets;
+        bool has_deleted_records;
+        size_t slack_space_size;
+    };
+    
+    struct BDBHeader {
+        uint32_t magic;
+        uint32_t version;
+        uint32_t pagesize;
+        uint8_t encrypt_algo;
+        uint8_t type;
+        uint32_t metaflags;
+        uint32_t free_page;
+        uint32_t last_page;
+        uint32_t nparts;
+    };
+    
+private:
+    std::string wallet_path_;
+    std::vector<BDBPage> pages_;
+    BDBHeader header_;
+    
+public:
+    explicit BDBPageScanner(const std::string& wallet_path) : wallet_path_(wallet_path) {}
+    
+    bool scan_wallet_file() {
+        std::ifstream file(wallet_path_, std::ios::binary);
+        if (!file.is_open()) {
+            return false;
+        }
+        
+        file.read(reinterpret_cast<char*>(&header_.magic), 4);
+        file.read(reinterpret_cast<char*>(&header_.version), 4);
+        file.read(reinterpret_cast<char*>(&header_.pagesize), 4);
+        
+        if (header_.magic != 0x00053162 && header_.magic != 0x62310500) {
+            return false;
+        }
+        
+        if (header_.pagesize == 0) {
+            header_.pagesize = 4096;
+        }
+        
+        file.seekg(0, std::ios::end);
+        size_t file_size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        size_t num_pages = file_size / header_.pagesize;
+        
+        for (size_t page_num = 0; page_num < num_pages; ++page_num) {
+            BDBPage page;
+            page.page_number = page_num;
+            page.page_data.resize(header_.pagesize);
+            
+            file.seekg(page_num * header_.pagesize);
+            file.read(reinterpret_cast<char*>(page.page_data.data()), header_.pagesize);
+            
+            if (page.page_data.size() >= 26) {
+                page.page_type = page.page_data[25];
+            }
+            
+            analyze_page_structure(page);
+            
+            pages_.push_back(page);
+        }
+        
+        return true;
+    }
+    
+    void analyze_page_structure(BDBPage& page) {
+        if (page.page_data.size() < 26) return;
+        
+        page.level = page.page_data[24];
+        
+        uint16_t num_entries_raw;
+        std::memcpy(&num_entries_raw, &page.page_data[20], 2);
+        page.num_entries = num_entries_raw;
+        
+        uint16_t free_area_offset;
+        std::memcpy(&free_area_offset, &page.page_data[16], 2);
+        
+        uint16_t high_offset = header_.pagesize;
+        for (size_t i = 0; i < page.num_entries && (26 + i * 2 + 1) < page.page_data.size(); ++i) {
+            uint16_t offset;
+            std::memcpy(&offset, &page.page_data[26 + i * 2], 2);
+            page.entry_offsets.push_back(offset);
+            if (offset < high_offset) {
+                high_offset = offset;
+            }
+        }
+        
+        if (free_area_offset < high_offset) {
+            page.slack_space_size = high_offset - free_area_offset;
+            page.has_deleted_records = page.slack_space_size > 100;
+        }
+    }
+    
+    std::vector<BDBPage> get_pages_with_slack() const {
+        std::vector<BDBPage> result;
+        for (const auto& page : pages_) {
+            if (page.has_deleted_records && page.slack_space_size > 0) {
+                result.push_back(page);
+            }
+        }
+        return result;
+    }
+    
+    std::vector<uint8_t> extract_slack_space(const BDBPage& page) const {
+        std::vector<uint8_t> slack;
+        
+        if (page.page_data.size() < 26) return slack;
+        
+        uint16_t free_area_offset;
+        std::memcpy(&free_area_offset, &page.page_data[16], 2);
+        
+        uint16_t high_offset = header_.pagesize;
+        for (auto offset : page.entry_offsets) {
+            if (offset < high_offset) {
+                high_offset = offset;
+            }
+        }
+        
+        if (free_area_offset < high_offset && free_area_offset < page.page_data.size()) {
+            size_t slack_size = std::min(static_cast<size_t>(high_offset - free_area_offset),
+                                        page.page_data.size() - free_area_offset);
+            slack.insert(slack.end(),
+                        page.page_data.begin() + free_area_offset,
+                        page.page_data.begin() + free_area_offset + slack_size);
+        }
+        
+        return slack;
+    }
+    
+    size_t get_total_slack_space() const {
+        size_t total = 0;
+        for (const auto& page : pages_) {
+            total += page.slack_space_size;
+        }
+        return total;
+    }
+};
+
+class PlaintextKeyExtractor {
+public:
+    struct KeyCandidate {
+        std::vector<uint8_t> key_data;
+        size_t page_number;
+        size_t offset_in_page;
+        std::string key_type;
+        double confidence_score;
+        bool is_encrypted;
+    };
+    
+private:
+    static constexpr size_t EC_PRIVKEY_SIZE = 32;
+    static constexpr size_t EC_PUBKEY_COMPRESSED_SIZE = 33;
+    static constexpr size_t EC_PUBKEY_UNCOMPRESSED_SIZE = 65;
+    
+public:
+    static bool looks_like_privkey(const std::vector<uint8_t>& data, size_t offset) {
+        if (offset + EC_PRIVKEY_SIZE > data.size()) return false;
+        
+        bool all_zero = true;
+        bool all_ff = true;
+        
+        for (size_t i = 0; i < EC_PRIVKEY_SIZE; ++i) {
+            uint8_t byte = data[offset + i];
+            if (byte != 0x00) all_zero = false;
+            if (byte != 0xFF) all_ff = false;
+        }
+        
+        if (all_zero || all_ff) return false;
+        
+        size_t bits_set = 0;
+        for (size_t i = 0; i < EC_PRIVKEY_SIZE; ++i) {
+            uint8_t byte = data[offset + i];
+            for (int b = 0; b < 8; ++b) {
+                if (byte & (1 << b)) bits_set++;
+            }
+        }
+        
+        double bit_ratio = static_cast<double>(bits_set) / (EC_PRIVKEY_SIZE * 8);
+        return bit_ratio > 0.3 && bit_ratio < 0.7;
+    }
+    
+    static bool looks_like_pubkey(const std::vector<uint8_t>& data, size_t offset) {
+        if (offset >= data.size()) return false;
+        
+        if (offset + EC_PUBKEY_COMPRESSED_SIZE <= data.size()) {
+            uint8_t prefix = data[offset];
+            if (prefix == 0x02 || prefix == 0x03) {
+                return true;
+            }
+        }
+        
+        if (offset + EC_PUBKEY_UNCOMPRESSED_SIZE <= data.size()) {
+            uint8_t prefix = data[offset];
+            if (prefix == 0x04) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    static std::vector<KeyCandidate> scan_for_keys(const std::vector<uint8_t>& data,
+                                                   size_t page_number) {
+        std::vector<KeyCandidate> candidates;
+        
+        for (size_t i = 0; i + EC_PRIVKEY_SIZE <= data.size(); ++i) {
+            if (looks_like_privkey(data, i)) {
+                KeyCandidate kc;
+                kc.key_data.assign(data.begin() + i, data.begin() + i + EC_PRIVKEY_SIZE);
+                kc.page_number = page_number;
+                kc.offset_in_page = i;
+                kc.key_type = "EC_PRIVATE_KEY";
+                kc.is_encrypted = false;
+                kc.confidence_score = 0.6;
+                
+                if (i >= 4) {
+                    if (data[i-4] == 0x30 && data[i-3] == 0x74) {
+                        kc.confidence_score = 0.85;
+                    }
+                }
+                
+                candidates.push_back(kc);
+            }
+            
+            if (looks_like_pubkey(data, i)) {
+                size_t key_size = (data[i] == 0x04) ? EC_PUBKEY_UNCOMPRESSED_SIZE : EC_PUBKEY_COMPRESSED_SIZE;
+                if (i + key_size <= data.size()) {
+                    KeyCandidate kc;
+                    kc.key_data.assign(data.begin() + i, data.begin() + i + key_size);
+                    kc.page_number = page_number;
+                    kc.offset_in_page = i;
+                    kc.key_type = "EC_PUBLIC_KEY";
+                    kc.is_encrypted = false;
+                    kc.confidence_score = 0.9;
+                    candidates.push_back(kc);
+                }
+            }
+        }
+        
+        return candidates;
+    }
+    
+    static bool is_likely_encrypted(const std::vector<uint8_t>& data) {
+        if (data.size() < 16) return false;
+        
+        std::array<uint8_t, 256> freq = {0};
+        for (uint8_t byte : data) {
+            freq[byte]++;
+        }
+        
+        double chi_square = 0.0;
+        double expected = static_cast<double>(data.size()) / 256.0;
+        for (auto f : freq) {
+            double diff = f - expected;
+            chi_square += (diff * diff) / expected;
+        }
+        
+        return chi_square < 400.0;
+    }
+};
+
+class DeletedRecordRecoverer {
+public:
+    struct DeletedRecord {
+        std::vector<uint8_t> key;
+        std::vector<uint8_t> value;
+        size_t page_number;
+        size_t recovery_offset;
+        std::string record_type;
+        bool is_complete;
+        double recovery_confidence;
+    };
+    
+private:
+    BDBPageScanner* page_scanner_;
+    
+public:
+    explicit DeletedRecordRecoverer(BDBPageScanner* scanner) : page_scanner_(scanner) {}
+    
+    std::vector<DeletedRecord> recover_all_deleted_records() {
+        std::vector<DeletedRecord> recovered;
+        
+        auto slack_pages = page_scanner_->get_pages_with_slack();
+        
+        for (const auto& page : slack_pages) {
+            auto page_records = recover_from_page(page);
+            recovered.insert(recovered.end(), page_records.begin(), page_records.end());
+        }
+        
+        return recovered;
+    }
+    
+    std::vector<DeletedRecord> recover_from_page(const BDBPageScanner::BDBPage& page) {
+        std::vector<DeletedRecord> records;
+        
+        auto slack_data = page_scanner_->extract_slack_space(page);
+        if (slack_data.empty()) return records;
+        
+        std::vector<std::pair<std::string, std::string>> record_markers = {
+            {"\x07\x00\x00\x00key", "CKey"},
+            {"\x04\x00\x00\x00name", "wallet_name"},
+            {"\x06\x00\x00\x00ckey", "ckey"},
+            {"\x05\x00\x00\x00pool", "keypool"},
+            {"\x06\x00\x00\x00mkey", "master_key"}
+        };
+        
+        for (const auto& [marker, type] : record_markers) {
+            size_t pos = 0;
+            while ((pos = find_pattern(slack_data, marker, pos)) != std::string::npos) {
+                DeletedRecord rec;
+                rec.page_number = page.page_number;
+                rec.recovery_offset = pos;
+                rec.record_type = type;
+                rec.is_complete = false;
+                rec.recovery_confidence = 0.5;
+                
+                size_t value_start = pos + marker.size();
+                size_t value_end = find_next_record_boundary(slack_data, value_start);
+                
+                if (value_end > value_start && value_end - value_start < 10000) {
+                    rec.value.assign(slack_data.begin() + value_start, 
+                                   slack_data.begin() + value_end);
+                    rec.is_complete = true;
+                    rec.recovery_confidence = 0.7;
+                    
+                    auto key_candidates = PlaintextKeyExtractor::scan_for_keys(rec.value, page.page_number);
+                    if (!key_candidates.empty()) {
+                        rec.recovery_confidence = 0.9;
+                    }
+                }
+                
+                records.push_back(rec);
+                pos = value_end;
+            }
+        }
+        
+        return records;
+    }
+    
+private:
+    size_t find_pattern(const std::vector<uint8_t>& data, const std::string& pattern, size_t start_pos) {
+        if (start_pos >= data.size()) return std::string::npos;
+        
+        for (size_t i = start_pos; i + pattern.size() <= data.size(); ++i) {
+            bool match = true;
+            for (size_t j = 0; j < pattern.size(); ++j) {
+                if (data[i + j] != static_cast<uint8_t>(pattern[j])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return i;
+        }
+        
+        return std::string::npos;
+    }
+    
+    size_t find_next_record_boundary(const std::vector<uint8_t>& data, size_t start) {
+        for (size_t i = start; i < data.size() && i < start + 1000; ++i) {
+            if (i + 4 < data.size()) {
+                if (data[i] == 0x00 && data[i+1] == 0x00 && 
+                    data[i+2] == 0x00 && data[i+3] == 0x00) {
+                    return i;
+                }
+            }
+        }
+        return std::min(start + 500, data.size());
+    }
+};
+
+class PageSlackAnalyzer {
+public:
+    struct SlackAnalysis {
+        size_t total_slack_bytes;
+        size_t pages_with_slack;
+        size_t potential_key_fragments;
+        size_t encrypted_fragments;
+        size_t plaintext_fragments;
+        std::vector<size_t> high_entropy_regions;
+        std::map<std::string, size_t> fragment_types;
+    };
+    
+    static SlackAnalysis analyze_wallet_slack(BDBPageScanner& scanner) {
+        SlackAnalysis analysis;
+        analysis.total_slack_bytes = scanner.get_total_slack_space();
+        
+        auto slack_pages = scanner.get_pages_with_slack();
+        analysis.pages_with_slack = slack_pages.size();
+        
+        for (const auto& page : slack_pages) {
+            auto slack_data = scanner.extract_slack_space(page);
+            
+            auto key_candidates = PlaintextKeyExtractor::scan_for_keys(slack_data, page.page_number);
+            analysis.potential_key_fragments += key_candidates.size();
+            
+            for (const auto& candidate : key_candidates) {
+                if (PlaintextKeyExtractor::is_likely_encrypted(candidate.key_data)) {
+                    analysis.encrypted_fragments++;
+                } else {
+                    analysis.plaintext_fragments++;
+                }
+                
+                analysis.fragment_types[candidate.key_type]++;
+            }
+            
+            auto entropy_regions = find_high_entropy_regions(slack_data);
+            analysis.high_entropy_regions.insert(analysis.high_entropy_regions.end(),
+                                                entropy_regions.begin(), entropy_regions.end());
+        }
+        
+        return analysis;
+    }
+    
+private:
+    static std::vector<size_t> find_high_entropy_regions(const std::vector<uint8_t>& data) {
+        std::vector<size_t> regions;
+        const size_t window_size = 64;
+        
+        for (size_t i = 0; i + window_size <= data.size(); i += window_size / 2) {
+            double entropy = calculate_shannon_entropy(data, i, window_size);
+            if (entropy > 7.0) {
+                regions.push_back(i);
+            }
+        }
+        
+        return regions;
+    }
+    
+    static double calculate_shannon_entropy(const std::vector<uint8_t>& data, 
+                                           size_t offset, size_t length) {
+        std::array<size_t, 256> freq = {0};
+        
+        for (size_t i = 0; i < length && offset + i < data.size(); ++i) {
+            freq[data[offset + i]]++;
+        }
+        
+        double entropy = 0.0;
+        for (auto f : freq) {
+            if (f > 0) {
+                double p = static_cast<double>(f) / length;
+                entropy -= p * std::log2(p);
+            }
+        }
+        
+        return entropy;
+    }
+};
+
+class DescriptorResidualScanner {
+public:
+    struct DescriptorResidue {
+        std::string descriptor_string;
+        std::vector<uint8_t> xpriv_data;
+        std::vector<uint8_t> seed_data;
+        size_t location_offset;
+        std::string context;
+        bool is_plaintext;
+        double exposure_severity;
+    };
+    
+    static std::vector<DescriptorResidue> scan_for_descriptor_leaks(
+            const std::vector<uint8_t>& wallet_data) {
+        std::vector<DescriptorResidue> residues;
+        
+        std::vector<std::string> descriptor_prefixes = {
+            "wpkh(",
+            "wsh(",
+            "pkh(",
+            "sh(",
+            "combo(",
+            "multi(",
+            "sortedmulti(",
+            "tr("
+        };
+        
+        std::string data_str(wallet_data.begin(), wallet_data.end());
+        
+        for (const auto& prefix : descriptor_prefixes) {
+            size_t pos = 0;
+            while ((pos = data_str.find(prefix, pos)) != std::string::npos) {
+                DescriptorResidue res;
+                res.location_offset = pos;
+                res.context = prefix;
+                
+                size_t end_pos = data_str.find(")", pos);
+                if (end_pos != std::string::npos) {
+                    res.descriptor_string = data_str.substr(pos, end_pos - pos + 1);
+                    
+                    if (res.descriptor_string.find("xprv") != std::string::npos) {
+                        res.is_plaintext = true;
+                        res.exposure_severity = 10.0;
+                        
+                        size_t xprv_pos = res.descriptor_string.find("xprv");
+                        if (xprv_pos != std::string::npos) {
+                            std::string xprv_substr = res.descriptor_string.substr(xprv_pos, 111);
+                            res.xpriv_data.assign(xprv_substr.begin(), xprv_substr.end());
+                        }
+                    } else {
+                        res.is_plaintext = false;
+                        res.exposure_severity = 3.0;
+                    }
+                    
+                    residues.push_back(res);
+                }
+                
+                pos += prefix.size();
+            }
+        }
+        
+        return residues;
+    }
+    
+    static std::vector<DescriptorResidue> scan_scriptpubkeyman_residue(
+            const std::vector<uint8_t>& heap_data) {
+        std::vector<DescriptorResidue> residues;
+        
+        std::vector<std::string> spkm_markers = {
+            "DescriptorScriptPubKeyMan",
+            "LegacyScriptPubKeyMan",
+            "hd_seed",
+            "seed_id",
+            "encrypted_seed"
+        };
+        
+        std::string data_str(heap_data.begin(), heap_data.end());
+        
+        for (const auto& marker : spkm_markers) {
+            size_t pos = 0;
+            while ((pos = data_str.find(marker, pos)) != std::string::npos) {
+                DescriptorResidue res;
+                res.location_offset = pos;
+                res.context = marker;
+                res.is_plaintext = (marker == "hd_seed");
+                res.exposure_severity = res.is_plaintext ? 9.0 : 5.0;
+                
+                size_t extract_start = pos + marker.size();
+                size_t extract_len = std::min(static_cast<size_t>(128), heap_data.size() - extract_start);
+                
+                res.seed_data.assign(heap_data.begin() + extract_start,
+                                   heap_data.begin() + extract_start + extract_len);
+                
+                residues.push_back(res);
+                pos += marker.size();
+            }
+        }
+        
+        return residues;
+    }
+};
+
+class WalletRecordReassembler {
+public:
+    struct ReassembledKey {
+        std::vector<uint8_t> private_key;
+        std::vector<uint8_t> public_key;
+        std::vector<uint8_t> chaincode;
+        uint32_t key_index;
+        std::string derivation_path;
+        bool is_complete;
+        bool was_fragmented;
+        std::vector<size_t> source_pages;
+    };
+    
+    static std::vector<ReassembledKey> reassemble_fragmented_keys(
+            const std::vector<DeletedRecordRecoverer::DeletedRecord>& deleted_records) {
+        std::vector<ReassembledKey> reassembled;
+        
+        std::map<uint32_t, std::vector<const DeletedRecordRecoverer::DeletedRecord*>> key_groups;
+        
+        for (const auto& rec : deleted_records) {
+            if (rec.record_type == "keypool" || rec.record_type == "CKey") {
+                uint32_t key_id = extract_key_index(rec.value);
+                key_groups[key_id].push_back(&rec);
+            }
+        }
+        
+        for (const auto& [key_id, records] : key_groups) {
+            ReassembledKey rk;
+            rk.key_index = key_id;
+            rk.is_complete = false;
+            rk.was_fragmented = records.size() > 1;
+            
+            for (const auto* rec : records) {
+                rk.source_pages.push_back(rec->page_number);
+                
+                auto candidates = PlaintextKeyExtractor::scan_for_keys(rec->value, rec->page_number);
+                
+                for (const auto& candidate : candidates) {
+                    if (candidate.key_type == "EC_PRIVATE_KEY" && rk.private_key.empty()) {
+                        rk.private_key = candidate.key_data;
+                    } else if (candidate.key_type == "EC_PUBLIC_KEY" && rk.public_key.empty()) {
+                        rk.public_key = candidate.key_data;
+                    }
+                }
+                
+                auto chaincode_data = extract_chaincode(rec->value);
+                if (!chaincode_data.empty() && rk.chaincode.empty()) {
+                    rk.chaincode = chaincode_data;
+                }
+            }
+            
+            rk.is_complete = !rk.private_key.empty() || !rk.public_key.empty();
+            
+            if (rk.is_complete) {
+                reassembled.push_back(rk);
+            }
+        }
+        
+        return reassembled;
+    }
+    
+private:
+    static uint32_t extract_key_index(const std::vector<uint8_t>& data) {
+        if (data.size() >= 4) {
+            uint32_t index;
+            std::memcpy(&index, data.data(), 4);
+            return index;
+        }
+        return 0;
+    }
+    
+    static std::vector<uint8_t> extract_chaincode(const std::vector<uint8_t>& data) {
+        std::vector<uint8_t> chaincode;
+        
+        for (size_t i = 0; i + 32 <= data.size(); ++i) {
+            double entropy = 0.0;
+            std::array<uint8_t, 256> freq = {0};
+            for (size_t j = 0; j < 32; ++j) {
+                freq[data[i + j]]++;
+            }
+            for (auto f : freq) {
+                if (f > 0) {
+                    double p = static_cast<double>(f) / 32.0;
+                    entropy -= p * std::log2(p);
+                }
+            }
+            
+            if (entropy > 7.5) {
+                chaincode.assign(data.begin() + i, data.begin() + i + 32);
+                break;
+            }
+        }
+        
+        return chaincode;
+    }
+};
+
+// ============================================================================
+// SECTION 47: HEAP SECRET RECOVERY AND MEMORY FORENSICS
+// ============================================================================
+
+class HeapSnapshotAnalyzer {
+public:
+    struct HeapRegion {
+        uint64_t base_address;
+        size_t size;
+        std::vector<uint8_t> contents;
+        std::string region_type;
+        bool is_freed;
+        std::chrono::steady_clock::time_point capture_time;
+    };
+    
+    struct SecretLocation {
+        uint64_t address;
+        size_t offset_in_region;
+        std::vector<uint8_t> secret_data;
+        std::string secret_type;
+        double confidence;
+        bool is_wiped;
+    };
+    
+private:
+    std::vector<HeapRegion> heap_snapshots_;
+    std::map<uint64_t, std::vector<SecretLocation>> secrets_by_address_;
+    
+public:
+    void capture_heap_snapshot(uint64_t base_addr, const std::vector<uint8_t>& heap_data,
+                               const std::string& region_type) {
+        HeapRegion region;
+        region.base_address = base_addr;
+        region.size = heap_data.size();
+        region.contents = heap_data;
+        region.region_type = region_type;
+        region.is_freed = false;
+        region.capture_time = std::chrono::steady_clock::now();
+        
+        heap_snapshots_.push_back(region);
+    }
+    
+    void mark_region_freed(uint64_t base_addr) {
+        for (auto& region : heap_snapshots_) {
+            if (region.base_address == base_addr) {
+                region.is_freed = true;
+                break;
+            }
+        }
+    }
+    
+    std::vector<SecretLocation> scan_for_secrets(const HeapRegion& region) {
+        std::vector<SecretLocation> locations;
+        
+        auto key_patterns = scan_for_key_patterns(region.contents);
+        for (const auto& pattern : key_patterns) {
+            SecretLocation loc;
+            loc.address = region.base_address + pattern.offset;
+            loc.offset_in_region = pattern.offset;
+            loc.secret_data = pattern.data;
+            loc.secret_type = pattern.type;
+            loc.confidence = pattern.confidence;
+            loc.is_wiped = is_memory_wiped(pattern.data);
+            locations.push_back(loc);
+        }
+        
+        auto password_patterns = scan_for_password_patterns(region.contents);
+        for (const auto& pattern : password_patterns) {
+            SecretLocation loc;
+            loc.address = region.base_address + pattern.offset;
+            loc.offset_in_region = pattern.offset;
+            loc.secret_data = pattern.data;
+            loc.secret_type = "password";
+            loc.confidence = pattern.confidence;
+            loc.is_wiped = is_memory_wiped(pattern.data);
+            locations.push_back(loc);
+        }
+        
+        return locations;
+    }
+    
+    std::vector<SecretLocation> find_stale_secrets() {
+        std::vector<SecretLocation> stale_secrets;
+        
+        for (const auto& region : heap_snapshots_) {
+            if (region.is_freed) {
+                auto secrets = scan_for_secrets(region);
+                for (const auto& secret : secrets) {
+                    if (!secret.is_wiped) {
+                        stale_secrets.push_back(secret);
+                    }
+                }
+            }
+        }
+        
+        return stale_secrets;
+    }
+    
+    struct TemporalAnalysis {
+        size_t total_secrets_found;
+        size_t secrets_properly_wiped;
+        size_t secrets_persisted;
+        std::chrono::milliseconds max_lifetime;
+        std::chrono::milliseconds avg_lifetime;
+        double wipe_success_rate;
+    };
+    
+    TemporalAnalysis analyze_secret_lifetime() {
+        TemporalAnalysis analysis;
+        analysis.total_secrets_found = 0;
+        analysis.secrets_properly_wiped = 0;
+        analysis.secrets_persisted = 0;
+        
+        std::vector<std::chrono::milliseconds> lifetimes;
+        
+        std::map<uint64_t, std::chrono::steady_clock::time_point> first_seen;
+        std::map<uint64_t, std::chrono::steady_clock::time_point> last_seen;
+        std::map<uint64_t, bool> was_wiped;
+        
+        for (const auto& region : heap_snapshots_) {
+            auto secrets = scan_for_secrets(region);
+            analysis.total_secrets_found += secrets.size();
+            
+            for (const auto& secret : secrets) {
+                uint64_t secret_id = secret.address;
+                
+                if (first_seen.find(secret_id) == first_seen.end()) {
+                    first_seen[secret_id] = region.capture_time;
+                }
+                last_seen[secret_id] = region.capture_time;
+                was_wiped[secret_id] = secret.is_wiped;
+            }
+        }
+        
+        for (const auto& [secret_id, wiped] : was_wiped) {
+            if (wiped) {
+                analysis.secrets_properly_wiped++;
+            } else {
+                analysis.secrets_persisted++;
+            }
+            
+            auto lifetime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                last_seen[secret_id] - first_seen[secret_id]);
+            lifetimes.push_back(lifetime);
+        }
+        
+        if (!lifetimes.empty()) {
+            analysis.max_lifetime = *std::max_element(lifetimes.begin(), lifetimes.end());
+            auto sum = std::accumulate(lifetimes.begin(), lifetimes.end(), std::chrono::milliseconds(0));
+            analysis.avg_lifetime = sum / lifetimes.size();
+        }
+        
+        if (analysis.total_secrets_found > 0) {
+            analysis.wipe_success_rate = static_cast<double>(analysis.secrets_properly_wiped) / 
+                                        analysis.total_secrets_found;
+        }
+        
+        return analysis;
+    }
+    
+private:
+    struct PatternMatch {
+        size_t offset;
+        std::vector<uint8_t> data;
+        std::string type;
+        double confidence;
+    };
+    
+    std::vector<PatternMatch> scan_for_key_patterns(const std::vector<uint8_t>& data) {
+        std::vector<PatternMatch> matches;
+        
+        for (size_t i = 0; i + 32 <= data.size(); ++i) {
+            if (PlaintextKeyExtractor::looks_like_privkey(data, i)) {
+                PatternMatch pm;
+                pm.offset = i;
+                pm.data.assign(data.begin() + i, data.begin() + i + 32);
+                pm.type = "private_key";
+                pm.confidence = 0.7;
+                matches.push_back(pm);
+                i += 31;
+            }
+        }
+        
+        return matches;
+    }
+    
+    std::vector<PatternMatch> scan_for_password_patterns(const std::vector<uint8_t>& data) {
+        std::vector<PatternMatch> matches;
+        
+        for (size_t i = 8; i < data.size() && i < 500; ++i) {
+            if (data[i] >= 32 && data[i] <= 126) {
+                size_t run_length = 0;
+                for (size_t j = i; j < data.size() && data[j] >= 32 && data[j] <= 126; ++j) {
+                    run_length++;
+                }
+                
+                if (run_length >= 8 && run_length <= 128) {
+                    PatternMatch pm;
+                    pm.offset = i;
+                    pm.data.assign(data.begin() + i, data.begin() + i + run_length);
+                    pm.type = "password_string";
+                    pm.confidence = 0.5;
+                    matches.push_back(pm);
+                    i += run_length;
+                }
+            }
+        }
+        
+        return matches;
+    }
+    
+    bool is_memory_wiped(const std::vector<uint8_t>& data) {
+        if (data.empty()) return true;
+        
+        uint8_t first_byte = data[0];
+        for (uint8_t byte : data) {
+            if (byte != first_byte) return false;
+        }
+        
+        return first_byte == 0x00 || first_byte == 0xFF;
+    }
+};
+
+class EntropySecretLocator {
+public:
+    struct EntropyWindow {
+        size_t offset;
+        size_t length;
+        double shannon_entropy;
+        double compression_ratio;
+        bool is_high_entropy;
+    };
+    
+    static std::vector<EntropyWindow> find_high_entropy_regions(
+            const std::vector<uint8_t>& data,
+            size_t window_size = 64) {
+        std::vector<EntropyWindow> windows;
+        
+        for (size_t i = 0; i + window_size <= data.size(); i += window_size / 4) {
+            EntropyWindow window;
+            window.offset = i;
+            window.length = window_size;
+            window.shannon_entropy = calculate_entropy(data, i, window_size);
+            window.compression_ratio = estimate_compression_ratio(data, i, window_size);
+            window.is_high_entropy = (window.shannon_entropy > 7.0);
+            
+            if (window.is_high_entropy) {
+                windows.push_back(window);
+            }
+        }
+        
+        return windows;
+    }
+    
+    static double calculate_entropy(const std::vector<uint8_t>& data, size_t offset, size_t length) {
+        std::array<size_t, 256> freq = {0};
+        
+        size_t count = 0;
+        for (size_t i = 0; i < length && offset + i < data.size(); ++i) {
+            freq[data[offset + i]]++;
+            count++;
+        }
+        
+        if (count == 0) return 0.0;
+        
+        double entropy = 0.0;
+        for (auto f : freq) {
+            if (f > 0) {
+                double p = static_cast<double>(f) / count;
+                entropy -= p * std::log2(p);
+            }
+        }
+        
+        return entropy;
+    }
+    
+    static double estimate_compression_ratio(const std::vector<uint8_t>& data, 
+                                            size_t offset, size_t length) {
+        std::map<uint16_t, size_t> bigram_freq;
+        
+        for (size_t i = 0; i < length - 1 && offset + i + 1 < data.size(); ++i) {
+            uint16_t bigram = (static_cast<uint16_t>(data[offset + i]) << 8) | 
+                             data[offset + i + 1];
+            bigram_freq[bigram]++;
+        }
+        
+        size_t unique_bigrams = bigram_freq.size();
+        size_t max_bigrams = std::min(length - 1, static_cast<size_t>(65536));
+        
+        return static_cast<double>(unique_bigrams) / max_bigrams;
+    }
+    
+    static std::vector<size_t> locate_probable_secrets(const std::vector<uint8_t>& data) {
+        std::vector<size_t> locations;
+        
+        auto entropy_windows = find_high_entropy_regions(data, 64);
+        
+        for (const auto& window : entropy_windows) {
+            if (window.shannon_entropy > 7.5 && 
+                window.compression_ratio > 0.6) {
+                locations.push_back(window.offset);
+            }
+        }
+        
+        return locations;
+    }
+};
+
+class MasterKeyResidueFinder {
+public:
+    struct MasterKeyResidue {
+        uint64_t heap_address;
+        std::vector<uint8_t> encrypted_key;
+        std::vector<uint8_t> salt;
+        uint32_t derivation_rounds;
+        uint32_t derivation_method;
+        std::vector<uint8_t> iv;
+        bool is_decrypted_version;
+        std::vector<uint8_t> decrypted_material;
+        std::chrono::steady_clock::time_point found_at;
+    };
+    
+    static std::vector<MasterKeyResidue> find_masterkey_residue(
+            const std::vector<HeapSnapshotAnalyzer::HeapRegion>& heap_regions) {
+        std::vector<MasterKeyResidue> residues;
+        
+        for (const auto& region : heap_regions) {
+            auto region_residues = scan_region_for_masterkeys(region);
+            residues.insert(residues.end(), region_residues.begin(), region_residues.end());
+        }
+        
+        return residues;
+    }
+    
+private:
+    static std::vector<MasterKeyResidue> scan_region_for_masterkeys(
+            const HeapSnapshotAnalyzer::HeapRegion& region) {
+        std::vector<MasterKeyResidue> residues;
+        
+        const std::vector<uint8_t>& data = region.contents;
+        
+        for (size_t i = 0; i + 100 <= data.size(); ++i) {
+            if (looks_like_cmasterkey_structure(data, i)) {
+                MasterKeyResidue residue;
+                residue.heap_address = region.base_address + i;
+                residue.found_at = region.capture_time;
+                residue.is_decrypted_version = false;
+                
+                size_t offset = i;
+                
+                if (offset + 8 <= data.size()) {
+                    std::memcpy(&residue.derivation_rounds, &data[offset], 4);
+                    std::memcpy(&residue.derivation_method, &data[offset + 4], 4);
+                    offset += 8;
+                }
+                
+                if (offset + 8 <= data.size()) {
+                    uint32_t salt_len;
+                    std::memcpy(&salt_len, &data[offset], 4);
+                    offset += 4;
+                    
+                    if (salt_len > 0 && salt_len <= 32 && offset + salt_len <= data.size()) {
+                        residue.salt.assign(data.begin() + offset, data.begin() + offset + salt_len);
+                        offset += salt_len;
+                    }
+                }
+                
+                if (offset + 32 <= data.size()) {
+                    residue.encrypted_key.assign(data.begin() + offset, data.begin() + offset + 32);
+                    offset += 32;
+                }
+                
+                if (offset + 16 <= data.size()) {
+                    residue.iv.assign(data.begin() + offset, data.begin() + offset + 16);
+                }
+                
+                auto entropy = EntropySecretLocator::calculate_entropy(residue.encrypted_key, 0, 
+                                                                      residue.encrypted_key.size());
+                if (entropy < 2.0) {
+                    residue.is_decrypted_version = true;
+                    residue.decrypted_material = residue.encrypted_key;
+                }
+                
+                residues.push_back(residue);
+            }
+        }
+        
+        return residues;
+    }
+    
+    static bool looks_like_cmasterkey_structure(const std::vector<uint8_t>& data, size_t offset) {
+        if (offset + 20 > data.size()) return false;
+        
+        uint32_t rounds;
+        std::memcpy(&rounds, &data[offset], 4);
+        
+        if (rounds < 1000 || rounds > 1000000) return false;
+        
+        uint32_t method;
+        std::memcpy(&method, &data[offset + 4], 4);
+        
+        if (method > 10) return false;
+        
+        uint32_t salt_len;
+        std::memcpy(&salt_len, &data[offset + 8], 4);
+        
+        if (salt_len == 0 || salt_len > 64) return false;
+        
+        return true;
+    }
+};
+
+class WalletLockResidueTracer {
+public:
+    struct LockEvent {
+        std::chrono::steady_clock::time_point lock_time;
+        std::vector<uint64_t> addresses_before_lock;
+        std::vector<uint64_t> addresses_after_lock;
+        std::vector<uint64_t> secrets_not_wiped;
+        bool wipe_successful;
+    };
+    
+private:
+    std::vector<LockEvent> lock_events_;
+    HeapSnapshotAnalyzer* heap_analyzer_;
+    
+public:
+    explicit WalletLockResidueTracer(HeapSnapshotAnalyzer* analyzer) 
+        : heap_analyzer_(analyzer) {}
+    
+    void record_lock_event() {
+        LockEvent event;
+        event.lock_time = std::chrono::steady_clock::now();
+        event.wipe_successful = true;
+        
+        auto stale_secrets = heap_analyzer_->find_stale_secrets();
+        
+        for (const auto& secret : stale_secrets) {
+            if (!secret.is_wiped) {
+                event.secrets_not_wiped.push_back(secret.address);
+                event.wipe_successful = false;
+            }
+        }
+        
+        lock_events_.push_back(event);
+    }
+    
+    std::vector<uint64_t> get_persistently_exposed_secrets() const {
+        std::map<uint64_t, size_t> exposure_count;
+        
+        for (const auto& event : lock_events_) {
+            for (auto addr : event.secrets_not_wiped) {
+                exposure_count[addr]++;
+            }
+        }
+        
+        std::vector<uint64_t> persistent;
+        for (const auto& [addr, count] : exposure_count) {
+            if (count >= 2) {
+                persistent.push_back(addr);
+            }
+        }
+        
+        return persistent;
+    }
+    
+    double calculate_wipe_success_rate() const {
+        if (lock_events_.empty()) return 0.0;
+        
+        size_t successful = 0;
+        for (const auto& event : lock_events_) {
+            if (event.wipe_successful) successful++;
+        }
+        
+        return static_cast<double>(successful) / lock_events_.size();
+    }
+};
+
+class AllocatorReuseSimulator {
+public:
+    struct AllocationEvent {
+        uint64_t address;
+        size_t size;
+        std::chrono::steady_clock::time_point alloc_time;
+        std::chrono::steady_clock::time_point free_time;
+        bool was_wiped_on_free;
+        std::string allocation_type;
+        std::vector<uint8_t> content_snapshot;
+    };
+    
+private:
+    std::vector<AllocationEvent> allocation_history_;
+    std::map<uint64_t, size_t> address_reuse_count_;
+    
+public:
+    void simulate_allocation(uint64_t addr, size_t size, const std::string& type,
+                            const std::vector<uint8_t>& initial_content) {
+        AllocationEvent event;
+        event.address = addr;
+        event.size = size;
+        event.alloc_time = std::chrono::steady_clock::now();
+        event.allocation_type = type;
+        event.content_snapshot = initial_content;
+        event.was_wiped_on_free = false;
+        
+        allocation_history_.push_back(event);
+        address_reuse_count_[addr]++;
+    }
+    
+    void simulate_free(uint64_t addr, bool wiped) {
+        for (auto& event : allocation_history_) {
+            if (event.address == addr && event.free_time == std::chrono::steady_clock::time_point{}) {
+                event.free_time = std::chrono::steady_clock::now();
+                event.was_wiped_on_free = wiped;
+                break;
+            }
+        }
+    }
+    
+    struct ReuseVulnerability {
+        uint64_t address;
+        size_t reuse_count;
+        std::vector<std::string> allocation_types;
+        bool secrets_leaked_across_reuse;
+        std::vector<size_t> leaked_allocation_indices;
+    };
+    
+    std::vector<ReuseVulnerability> analyze_reuse_vulnerabilities() {
+        std::vector<ReuseVulnerability> vulns;
+        
+        std::map<uint64_t, std::vector<size_t>> addr_to_allocs;
+        for (size_t i = 0; i < allocation_history_.size(); ++i) {
+            addr_to_allocs[allocation_history_[i].address].push_back(i);
+        }
+        
+        for (const auto& [addr, alloc_indices] : addr_to_allocs) {
+            if (alloc_indices.size() >= 2) {
+                ReuseVulnerability vuln;
+                vuln.address = addr;
+                vuln.reuse_count = alloc_indices.size();
+                vuln.secrets_leaked_across_reuse = false;
+                
+                for (size_t i = 0; i < alloc_indices.size(); ++i) {
+                    const auto& alloc = allocation_history_[alloc_indices[i]];
+                    vuln.allocation_types.push_back(alloc.allocation_type);
+                    
+                    if (i > 0) {
+                        const auto& prev_alloc = allocation_history_[alloc_indices[i-1]];
+                        if (!prev_alloc.was_wiped_on_free) {
+                            vuln.secrets_leaked_across_reuse = true;
+                            vuln.leaked_allocation_indices.push_back(alloc_indices[i-1]);
+                        }
+                    }
+                }
+                
+                if (vuln.secrets_leaked_across_reuse) {
+                    vulns.push_back(vuln);
+                }
+            }
+        }
+        
+        return vulns;
+    }
+};
+
+// ============================================================================
+// SECTION 48: ZEROIZATION VALIDATION AND WIPE VERIFICATION
+// ============================================================================
+
+class SecretLifetimeTracer {
+public:
+    struct SecretLifecycle {
+        std::string variable_name;
+        std::string function_name;
+        uint32_t declaration_line;
+        uint32_t last_use_line;
+        uint32_t scope_exit_line;
+        uint32_t wipe_line;
+        bool explicitly_wiped;
+        bool scope_escaped;
+        std::vector<std::string> escape_paths;
+        std::chrono::milliseconds estimated_lifetime;
+    };
+    
+private:
+    std::map<std::string, std::vector<SecretLifecycle>> lifecycles_by_function_;
+    
+public:
+    void trace_secret_variable(const std::string& var_name, const std::string& function_name,
+                              const std::string& function_body) {
+        SecretLifecycle lifecycle;
+        lifecycle.variable_name = var_name;
+        lifecycle.function_name = function_name;
+        lifecycle.explicitly_wiped = false;
+        lifecycle.scope_escaped = false;
+        
+        std::istringstream stream(function_body);
+        std::string line;
+        uint32_t line_num = 0;
+        bool found_declaration = false;
+        
+        while (std::getline(stream, line)) {
+            line_num++;
+            
+            if (!found_declaration && line.find(var_name) != std::string::npos &&
+                (line.find("std::string") != std::string::npos ||
+                 line.find("SecureString") != std::string::npos ||
+                 line.find("CKey") != std::string::npos ||
+                 line.find("vector<uint8_t>") != std::string::npos)) {
+                lifecycle.declaration_line = line_num;
+                found_declaration = true;
+            }
+            
+            if (found_declaration && line.find(var_name) != std::string::npos) {
+                lifecycle.last_use_line = line_num;
+                
+                if (line.find("return") != std::string::npos && line.find(var_name) != std::string::npos) {
+                    lifecycle.scope_escaped = true;
+                    lifecycle.escape_paths.push_back("return_value_line_" + std::to_string(line_num));
+                }
+                
+                if (line.find("&" + var_name) != std::string::npos || 
+                    line.find(var_name + ".data()") != std::string::npos) {
+                    lifecycle.scope_escaped = true;
+                    lifecycle.escape_paths.push_back("pointer_escape_line_" + std::to_string(line_num));
+                }
+                
+                if (line.find("memory_cleanse") != std::string::npos ||
+                    line.find("OPENSSL_cleanse") != std::string::npos ||
+                    line.find(".clear()") != std::string::npos) {
+                    lifecycle.explicitly_wiped = true;
+                    lifecycle.wipe_line = line_num;
+                }
+            }
+            
+            if (found_declaration && line.find("}") != std::string::npos) {
+                lifecycle.scope_exit_line = line_num;
+            }
+        }
+        
+        lifecycles_by_function_[function_name].push_back(lifecycle);
+    }
+    
+    std::vector<SecretLifecycle> get_unwed_secrets() const {
+        std::vector<SecretLifecycle> unwiped;
+        
+        for (const auto& [func, lifecycles] : lifecycles_by_function_) {
+            for (const auto& lc : lifecycles) {
+                if (!lc.explicitly_wiped && !lc.scope_escaped) {
+                    unwiped.push_back(lc);
+                }
+            }
+        }
+        
+        return unwiped;
+    }
+    
+    std::vector<SecretLifecycle> get_scope_escaped_secrets() const {
+        std::vector<SecretLifecycle> escaped;
+        
+        for (const auto& [func, lifecycles] : lifecycles_by_function_) {
+            for (const auto& lc : lifecycles) {
+                if (lc.scope_escaped) {
+                    escaped.push_back(lc);
+                }
+            }
+        }
+        
+        return escaped;
+    }
+};
+
+class ScopeEscapeAnalyzer {
+public:
+    struct EscapePoint {
+        std::string variable;
+        std::string escape_mechanism;
+        uint32_t line_number;
+        std::string context;
+        bool is_return_value;
+        bool is_reference_escape;
+        bool is_pointer_escape;
+        bool is_lambda_capture;
+    };
+    
+    static std::vector<EscapePoint> analyze_function(const std::string& function_body,
+                                                     const std::vector<std::string>& secret_vars) {
+        std::vector<EscapePoint> escapes;
+        
+        std::istringstream stream(function_body);
+        std::string line;
+        uint32_t line_num = 0;
+        
+        while (std::getline(stream, line)) {
+            line_num++;
+            
+            for (const auto& var : secret_vars) {
+                if (line.find("return") != std::string::npos && line.find(var) != std::string::npos) {
+                    EscapePoint ep;
+                    ep.variable = var;
+                    ep.escape_mechanism = "return";
+                    ep.line_number = line_num;
+                    ep.context = line;
+                    ep.is_return_value = true;
+                    ep.is_reference_escape = (line.find("&") != std::string::npos);
+                    ep.is_pointer_escape = (line.find("*") != std::string::npos);
+                    ep.is_lambda_capture = false;
+                    escapes.push_back(ep);
+                }
+                
+                if (line.find("&" + var) != std::string::npos || 
+                    line.find("std::ref(" + var) != std::string::npos) {
+                    EscapePoint ep;
+                    ep.variable = var;
+                    ep.escape_mechanism = "reference";
+                    ep.line_number = line_num;
+                    ep.context = line;
+                    ep.is_return_value = false;
+                    ep.is_reference_escape = true;
+                    ep.is_pointer_escape = false;
+                    ep.is_lambda_capture = false;
+                    escapes.push_back(ep);
+                }
+                
+                if (line.find(var + ".data()") != std::string::npos ||
+                    line.find(var + ".c_str()") != std::string::npos) {
+                    EscapePoint ep;
+                    ep.variable = var;
+                    ep.escape_mechanism = "pointer";
+                    ep.line_number = line_num;
+                    ep.context = line;
+                    ep.is_return_value = false;
+                    ep.is_reference_escape = false;
+                    ep.is_pointer_escape = true;
+                    ep.is_lambda_capture = false;
+                    escapes.push_back(ep);
+                }
+                
+                if (line.find("[&]") != std::string::npos || 
+                    line.find("[=]") != std::string::npos ||
+                    line.find("[" + var + "]") != std::string::npos) {
+                    EscapePoint ep;
+                    ep.variable = var;
+                    ep.escape_mechanism = "lambda_capture";
+                    ep.line_number = line_num;
+                    ep.context = line;
+                    ep.is_return_value = false;
+                    ep.is_reference_escape = false;
+                    ep.is_pointer_escape = false;
+                    ep.is_lambda_capture = true;
+                    escapes.push_back(ep);
+                }
+            }
+        }
+        
+        return escapes;
+    }
+};
+
+class ExceptionPathResidueScanner {
+public:
+    struct ExceptionPath {
+        std::string function_name;
+        uint32_t throw_line;
+        std::string exception_type;
+        std::vector<std::string> secrets_in_scope;
+        std::vector<std::string> secrets_not_wiped;
+        bool has_finally_wipe;
+        bool has_destructor_wipe;
+    };
+    
+    static std::vector<ExceptionPath> scan_exception_safety(
+            const std::string& function_name,
+            const std::string& function_body,
+            const std::vector<std::string>& secret_vars) {
+        std::vector<ExceptionPath> paths;
+        
+        std::istringstream stream(function_body);
+        std::string line;
+        uint32_t line_num = 0;
+        
+        std::set<std::string> active_secrets;
+        for (const auto& var : secret_vars) {
+            if (function_body.find(var) != std::string::npos) {
+                active_secrets.insert(var);
+            }
+        }
+        
+        while (std::getline(stream, line)) {
+            line_num++;
+            
+            if (line.find("throw") != std::string::npos) {
+                ExceptionPath path;
+                path.function_name = function_name;
+                path.throw_line = line_num;
+                path.exception_type = extract_exception_type(line);
+                path.has_finally_wipe = false;
+                path.has_destructor_wipe = false;
+                
+                for (const auto& secret : active_secrets) {
+                    path.secrets_in_scope.push_back(secret);
+                    
+                    std::string preceding_context = get_preceding_lines(function_body, line_num, 10);
+                    if (preceding_context.find("memory_cleanse") == std::string::npos ||
+                        preceding_context.find(secret) == std::string::npos) {
+                        path.secrets_not_wiped.push_back(secret);
+                    }
+                }
+                
+                if (function_body.find("~") != std::string::npos &&
+                    function_body.find("memory_cleanse") != std::string::npos) {
+                    path.has_destructor_wipe = true;
+                }
+                
+                paths.push_back(path);
+            }
+        }
+        
+        return paths;
+    }
+    
+private:
+    static std::string extract_exception_type(const std::string& throw_line) {
+        size_t throw_pos = throw_line.find("throw");
+        if (throw_pos == std::string::npos) return "unknown";
+        
+        std::string after_throw = throw_line.substr(throw_pos + 5);
+        size_t paren_pos = after_throw.find("(");
+        if (paren_pos != std::string::npos) {
+            return after_throw.substr(0, paren_pos);
+        }
+        
+        size_t semi_pos = after_throw.find(";");
+        if (semi_pos != std::string::npos) {
+            return after_throw.substr(0, semi_pos);
+        }
+        
+        return "rethrow";
+    }
+    
+    static std::string get_preceding_lines(const std::string& text, uint32_t target_line, uint32_t count) {
+        std::istringstream stream(text);
+        std::string line;
+        std::vector<std::string> lines;
+        
+        while (std::getline(stream, line)) {
+            lines.push_back(line);
+        }
+        
+        if (target_line < count || target_line > lines.size()) return "";
+        
+        std::string result;
+        for (uint32_t i = target_line - count; i < target_line; ++i) {
+            result += lines[i] + "\n";
+        }
+        
+        return result;
+    }
+};
+
+class WipeElisionDetector {
+public:
+    struct WipeElision {
+        std::string variable;
+        std::string function;
+        uint32_t wipe_call_line;
+        std::string optimization_level;
+        bool is_loop_invariant;
+        bool is_dead_store;
+        bool has_volatile_qualifier;
+        bool has_inline_asm_barrier;
+    };
+    
+    static std::vector<WipeElision> detect_potential_elisions(
+            const std::string& function_body,
+            const std::vector<std::string>& wiped_vars) {
+        std::vector<WipeElision> elisions;
+        
+        for (const auto& var : wiped_vars) {
+            std::string wipe_pattern = "memory_cleanse.*" + var;
+            
+            size_t wipe_pos = function_body.find("memory_cleanse");
+            while (wipe_pos != std::string::npos) {
+                if (function_body.substr(wipe_pos, 100).find(var) != std::string::npos) {
+                    WipeElision elision;
+                    elision.variable = var;
+                    elision.wipe_call_line = count_lines_before(function_body, wipe_pos);
+                    
+                    elision.has_volatile_qualifier = 
+                        (function_body.find("volatile") != std::string::npos &&
+                         function_body.find("volatile", wipe_pos) < wipe_pos + 200);
+                    
+                    elision.has_inline_asm_barrier =
+                        (function_body.find("asm volatile") != std::string::npos);
+                    
+                    std::string after_wipe = function_body.substr(wipe_pos, 500);
+                    elision.is_dead_store = (after_wipe.find(var) == std::string::npos ||
+                                            after_wipe.find("return") != std::string::npos);
+                    
+                    elision.is_loop_invariant = is_in_loop(function_body, wipe_pos);
+                    
+                    if (!elision.has_volatile_qualifier && !elision.has_inline_asm_barrier) {
+                        elisions.push_back(elision);
+                    }
+                }
+                
+                wipe_pos = function_body.find("memory_cleanse", wipe_pos + 1);
+            }
+        }
+        
+        return elisions;
+    }
+    
+private:
+    static uint32_t count_lines_before(const std::string& text, size_t pos) {
+        uint32_t lines = 1;
+        for (size_t i = 0; i < pos && i < text.size(); ++i) {
+            if (text[i] == '\n') lines++;
+        }
+        return lines;
+    }
+    
+    static bool is_in_loop(const std::string& text, size_t pos) {
+        int brace_depth = 0;
+        for (size_t i = pos; i > 0 && i > pos - 1000; --i) {
+            if (text[i] == '}') brace_depth++;
+            if (text[i] == '{') {
+                brace_depth--;
+                if (brace_depth < 0) {
+                    std::string preceding = text.substr(std::max(i - 50, static_cast<size_t>(0)), 50);
+                    if (preceding.find("for") != std::string::npos ||
+                        preceding.find("while") != std::string::npos ||
+                        preceding.find("do") != std::string::npos) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+};
+
+// ============================================================================
+// SECTION 49: CONCURRENCY AND RACE CONDITION EXPLOITATION
+// ============================================================================
+
+class LockedPoolRaceAnalyzer {
+public:
+    struct RaceCondition {
+        std::string operation1;
+        std::string operation2;
+        std::vector<uint64_t> shared_addresses;
+        bool involves_wipe;
+        bool involves_read;
+        bool involves_allocation;
+        double race_window_ns;
+        std::string exploitation_method;
+    };
+    
+    struct ThreadInterleaving {
+        std::vector<std::string> thread1_ops;
+        std::vector<std::string> thread2_ops;
+        std::vector<size_t> race_points;
+        bool causes_exposure;
+    };
+    
+private:
+    std::vector<RaceCondition> detected_races_;
+    
+public:
+    std::vector<RaceCondition> analyze_lockedpool_operations(
+            const std::string& lockedpool_code) {
+        std::vector<RaceCondition> races;
+        
+        std::vector<std::pair<std::string, bool>> operations;
+        
+        if (lockedpool_code.find("alloc") != std::string::npos) {
+            operations.push_back({"alloc", false});
+        }
+        if (lockedpool_code.find("free") != std::string::npos) {
+            operations.push_back({"free", true});
+        }
+        if (lockedpool_code.find("memory_cleanse") != std::string::npos || 
+            lockedpool_code.find("cleanse") != std::string::npos) {
+            operations.push_back({"wipe", true});
+        }
+        
+        for (size_t i = 0; i < operations.size(); ++i) {
+            for (size_t j = i + 1; j < operations.size(); ++j) {
+                RaceCondition race;
+                race.operation1 = operations[i].first;
+                race.operation2 = operations[j].first;
+                race.involves_wipe = operations[i].second || operations[j].second;
+                race.involves_read = false;
+                race.involves_allocation = (operations[i].first == "alloc" || operations[j].first == "alloc");
+                
+                if (race.operation1 == "wipe" && race.operation2 == "free") {
+                    race.race_window_ns = 100.0;
+                    race.exploitation_method = "Read freed memory before wipe completes";
+                    races.push_back(race);
+                }
+                
+                if (race.operation1 == "alloc" && race.operation2 == "wipe") {
+                    race.race_window_ns = 50.0;
+                    race.exploitation_method = "Allocate at address being wiped";
+                    races.push_back(race);
+                }
+            }
+        }
+        
+        detected_races_ = races;
+        return races;
+    }
+    
+    std::vector<ThreadInterleaving> generate_exploitation_interleavings(
+            const RaceCondition& race) {
+        std::vector<ThreadInterleaving> interleavings;
+        
+        if (race.operation1 == "wipe" && race.operation2 == "free") {
+            ThreadInterleaving interleave;
+            interleave.thread1_ops = {
+                "Begin wipe operation",
+                "Write zeros to first 8 bytes",
+                "[PREEMPTED]"
+            };
+            interleave.thread2_ops = {
+                "[SCHEDULED]",
+                "Call free() on same address",
+                "Read residual bytes 8-31",
+                "Succeed - partial secret recovered"
+            };
+            interleave.race_points = {2};
+            interleave.causes_exposure = true;
+            interleavings.push_back(interleave);
+        }
+        
+        if (race.operation1 == "alloc" && race.operation2 == "wipe") {
+            ThreadInterleaving interleave;
+            interleave.thread1_ops = {
+                "Allocate memory at 0xDEADBEEF",
+                "Write secret to allocation",
+                "Begin using secret"
+            };
+            interleave.thread2_ops = {
+                "Wipe memory at 0xDEADBEEF (stale reference)",
+                "Corrupt active secret",
+                "Cause use-after-wipe"
+            };
+            interleave.race_points = {1, 2};
+            interleave.causes_exposure = true;
+            interleavings.push_back(interleave);
+        }
+        
+        return interleavings;
+    }
+};
+
+class ThreadInterleavingExplorer {
+public:
+    struct ThreadOp {
+        uint32_t thread_id;
+        uint32_t operation_index;
+        std::string operation_type;
+        uint64_t target_address;
+        std::chrono::nanoseconds timestamp;
+    };
+    
+    struct Schedule {
+        std::vector<ThreadOp> ordered_ops;
+        bool produces_vulnerability;
+        std::string vulnerability_type;
+        std::vector<size_t> critical_interleaving_points;
+    };
+    
+    static std::vector<Schedule> explore_all_schedules(
+            const std::vector<ThreadOp>& thread1_ops,
+            const std::vector<ThreadOp>& thread2_ops) {
+        std::vector<Schedule> schedules;
+        
+        size_t total_ops = thread1_ops.size() + thread2_ops.size();
+        
+        std::function<void(std::vector<ThreadOp>&, size_t, size_t)> generate;
+        generate = [&](std::vector<ThreadOp>& current, size_t t1_idx, size_t t2_idx) {
+            if (t1_idx == thread1_ops.size() && t2_idx == thread2_ops.size()) {
+                Schedule sched;
+                sched.ordered_ops = current;
+                sched.produces_vulnerability = analyze_schedule_for_vulnerability(current);
+                schedules.push_back(sched);
+                return;
+            }
+            
+            if (t1_idx < thread1_ops.size()) {
+                current.push_back(thread1_ops[t1_idx]);
+                generate(current, t1_idx + 1, t2_idx);
+                current.pop_back();
+            }
+            
+            if (t2_idx < thread2_ops.size()) {
+                current.push_back(thread2_ops[t2_idx]);
+                generate(current, t1_idx, t2_idx + 1);
+                current.pop_back();
+            }
+        };
+        
+        std::vector<ThreadOp> current;
+        generate(current, 0, 0);
+        
+        return schedules;
+    }
+    
+private:
+    static bool analyze_schedule_for_vulnerability(const std::vector<ThreadOp>& schedule) {
+        std::map<uint64_t, std::string> last_operation;
+        
+        for (const auto& op : schedule) {
+            auto& last_op = last_operation[op.target_address];
+            
+            if (op.operation_type == "read" && last_op == "wipe_started") {
+                return true;
+            }
+            
+            if (op.operation_type == "write" && last_op == "freed") {
+                return true;
+            }
+            
+            if (op.operation_type == "wipe_started") {
+                last_op = "wipe_started";
+            } else if (op.operation_type == "free") {
+                last_op = "freed";
+            } else {
+                last_op = op.operation_type;
+            }
+        }
+        
+        return false;
+    }
+};
+
+class PartialWipeWitnessBuilder {
+public:
+    struct WipeWitness {
+        uint64_t memory_address;
+        size_t total_size;
+        std::vector<uint8_t> before_wipe;
+        std::vector<uint8_t> during_wipe;
+        std::vector<uint8_t> after_wipe;
+        size_t bytes_wiped;
+        size_t bytes_remaining;
+        std::vector<size_t> unwiped_offsets;
+    };
+    
+    static WipeWitness capture_partial_wipe(uint64_t addr, size_t size,
+                                           const std::vector<uint8_t>& original_data) {
+        WipeWitness witness;
+        witness.memory_address = addr;
+        witness.total_size = size;
+        witness.before_wipe = original_data;
+        witness.bytes_wiped = 0;
+        witness.bytes_remaining = size;
+        
+        witness.during_wipe = original_data;
+        
+        size_t wipe_amount = size / 2;
+        for (size_t i = 0; i < wipe_amount; ++i) {
+            witness.during_wipe[i] = 0x00;
+            witness.bytes_wiped++;
+            witness.bytes_remaining--;
+        }
+        
+        for (size_t i = wipe_amount; i < size; ++i) {
+            witness.unwiped_offsets.push_back(i);
+        }
+        
+        witness.after_wipe = witness.during_wipe;
+        
+        return witness;
+    }
+    
+    static std::vector<uint8_t> extract_leaked_secret(const WipeWitness& witness) {
+        std::vector<uint8_t> leaked;
+        
+        for (auto offset : witness.unwiped_offsets) {
+            if (offset < witness.during_wipe.size()) {
+                leaked.push_back(witness.during_wipe[offset]);
+            }
+        }
+        
+        return leaked;
+    }
+};
 
 } // namespace btc_audit
 
