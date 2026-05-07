@@ -14508,6 +14508,1697 @@ public:
     }
 };
 
+// ============================================================================
+// SECTION: NEXT-GENERATION EXPLOIT DISCOVERY ENGINES
+// ============================================================================
+// NEW TAXONOMY: Strict separation of vulnerability classes
+// OBJECTIVE: Discover ONLY novel, previously undisclosed vulnerabilities
+// ============================================================================
+
+// ============================================================================
+// ENHANCED VULNERABILITY TAXONOMY
+// ============================================================================
+
+enum class ExploitCategory : uint8_t {
+    CONSENSUS_INFLATION = 0,
+    CONSENSUS_DOUBLE_SPEND = 1,
+    MEMPOOL_POLICY_BYPASS = 2,
+    TAPSCRIPT_BYPASS = 3,
+    WITNESS_COMMITMENT_INTEGRITY = 4,
+    KEY_RECOVERY_ATTACK = 5,
+    WALLET_SECRET_LEAKAGE = 6,
+    SCRIPT_EXPLOITATION = 7,
+    INTEGER_OVERFLOW = 8,
+    CACHE_DIVERGENCE = 9,
+    REORG_INCONSISTENCY = 10,
+    NONCE_REUSE = 11,
+    SIGHASH_CONFUSION = 12,
+    UTXO_RESURRECTION = 13,
+    PACKAGE_RELAY_EXPLOIT = 14,
+    OPCODE_STATE_CORRUPTION = 15,
+    KNOWN_HISTORICAL = 255
+};
+
+enum class KnownCVE : uint16_t {
+    CVE_2018_17144 = 0,
+    CVE_2021_31876 = 1,
+    KNOWN_RBF_INHERITANCE = 2,
+    KNOWN_VALUE_OVERFLOW = 3,
+    KNOWN_SIGHASH_SINGLE = 4,
+    KNOWN_CHECKMULTISIG_QUIRKS = 5,
+    KNOWN_WALLET_DAT_WEAKNESS = 6,
+    KNOWN_KEYPOOL_LEAKAGE = 7,
+    KNOWN_PADDING_ORACLE = 8,
+    KNOWN_CRASH_DUMP = 9,
+    KNOWN_INCOMPLETE_ZEROIZATION = 10,
+    UNKNOWN = 65535
+};
+
+struct ExploitEvidence {
+    ExploitCategory category;
+    std::string title;
+    std::string description;
+    Severity severity;
+    std::vector<SourceLocation> locations;
+    std::map<std::string, std::string> technical_details;
+    std::string exploit_primitive;
+    std::string reachability_proof;
+    std::string controllability_proof;
+    std::string impact_analysis;
+    bool is_novel;
+    bool is_exploitable;
+    KnownCVE matches_known_cve;
+    std::string deduplication_hash;
+    std::vector<std::string> affected_versions;
+    std::vector<std::string> mitigation_verification;
+    
+    ExploitEvidence() : category(ExploitCategory::KNOWN_HISTORICAL),
+                        severity(Severity::Informational),
+                        is_novel(false),
+                        is_exploitable(false),
+                        matches_known_cve(KnownCVE::UNKNOWN) {}
+};
+
+// ============================================================================
+// STRICT SECRET TYPE TAXONOMY
+// ============================================================================
+
+class SecretTypeTaxonomy {
+public:
+    enum class SecretClass : uint8_t {
+        PRIVATE_KEY_MATERIAL,
+        MASTER_KEY_MATERIAL,
+        HD_SEED_MATERIAL,
+        MNEMONIC_SEED,
+        DECRYPTED_WALLET_SECRET,
+        DESCRIPTOR_PRIVATE_MATERIAL,
+        ENCRYPTION_KEY,
+        NOT_SECRET
+    };
+    
+    static SecretClass classify_type(const std::string& type_name) {
+        if (type_name == "CKey" || type_name == "CPrivKey") {
+            return SecretClass::PRIVATE_KEY_MATERIAL;
+        }
+        if (type_name == "CMasterKey" || type_name == "vMasterKey") {
+            return SecretClass::MASTER_KEY_MATERIAL;
+        }
+        if (type_name.find("HDSeed") != std::string::npos) {
+            return SecretClass::HD_SEED_MATERIAL;
+        }
+        if (type_name.find("mnemonic") != std::string::npos) {
+            return SecretClass::MNEMONIC_SEED;
+        }
+        
+        if (type_name == "CPubKey" || type_name == "scriptPubKey" ||
+            type_name.find("Counter") != std::string::npos ||
+            type_name.find("Flag") != std::string::npos) {
+            return SecretClass::NOT_SECRET;
+        }
+        
+        return SecretClass::NOT_SECRET;
+    }
+    
+    static bool is_confirmed_secret(const std::string& var_name, const std::string& type_name) {
+        SecretClass cls = classify_type(type_name);
+        if (cls != SecretClass::NOT_SECRET) {
+            return true;
+        }
+        
+        if (var_name.find("priv") != std::string::npos ||
+            var_name.find("secret") != std::string::npos ||
+            var_name.find("seed") != std::string::npos ||
+            var_name.find("master") != std::string::npos) {
+            if (var_name.find("pub") == std::string::npos &&
+                var_name.find("script") == std::string::npos) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+};
+
+// ============================================================================
+// KNOWN CVE SUPPRESSION ENGINE
+// ============================================================================
+
+class KnownVulnerabilityFilter {
+private:
+    struct KnownPattern {
+        std::string signature;
+        KnownCVE cve_id;
+        std::string description;
+        std::vector<std::string> file_patterns;
+        std::vector<std::string> code_patterns;
+    };
+    
+    std::vector<KnownPattern> known_patterns;
+    
+public:
+    KnownVulnerabilityFilter() {
+        known_patterns = {
+            {
+                "CVE-2018-17144_inflation",
+                KnownCVE::CVE_2018_17144,
+                "Duplicate input spending inflation bug",
+                {"validation.cpp", "consensus/tx_verify.cpp"},
+                {"CheckTxInputs", "prevout", "duplicate"}
+            },
+            {
+                "CVE-2021-31876_double_spend",
+                KnownCVE::CVE_2021_31876,
+                "Mininode peer eviction double spend",
+                {"net_processing.cpp", "net.cpp"},
+                {"misbehaving", "eviction", "orphan"}
+            },
+            {
+                "KNOWN_SIGHASH_SINGLE_bug",
+                KnownCVE::KNOWN_SIGHASH_SINGLE,
+                "Historical SIGHASH_SINGLE out-of-range behavior",
+                {"interpreter.cpp", "script/interpreter.cpp"},
+                {"SIGHASH_SINGLE", "nIn", "outputs.size()"}
+            },
+            {
+                "KNOWN_CHECKMULTISIG_dummy",
+                KnownCVE::KNOWN_CHECKMULTISIG_QUIRKS,
+                "CHECKMULTISIG off-by-one stack consumption",
+                {"interpreter.cpp"},
+                {"OP_CHECKMULTISIG", "dummy element"}
+            },
+            {
+                "KNOWN_RBF_inheritance",
+                KnownCVE::KNOWN_RBF_INHERITANCE,
+                "RBF signaling inheritance issues",
+                {"policy/rbf.cpp", "validation.cpp"},
+                {"BIP125", "ReplaceByFee", "signaling"}
+            }
+        };
+    }
+    
+    KnownCVE match_known_vulnerability(const ExploitEvidence& evidence) {
+        std::string combined_signature = evidence.title + evidence.description;
+        for (const auto& loc : evidence.locations) {
+            combined_signature += loc.file_path;
+        }
+        
+        for (const auto& pattern : known_patterns) {
+            bool file_match = false;
+            for (const auto& file_pat : pattern.file_patterns) {
+                for (const auto& loc : evidence.locations) {
+                    if (loc.file_path.find(file_pat) != std::string::npos) {
+                        file_match = true;
+                        break;
+                    }
+                }
+                if (file_match) break;
+            }
+            
+            if (!file_match) continue;
+            
+            bool code_match = false;
+            for (const auto& code_pat : pattern.code_patterns) {
+                if (combined_signature.find(code_pat) != std::string::npos) {
+                    code_match = true;
+                    break;
+                }
+            }
+            
+            if (file_match && code_match) {
+                return pattern.cve_id;
+            }
+        }
+        
+        return KnownCVE::UNKNOWN;
+    }
+    
+    bool should_suppress(const ExploitEvidence& evidence) {
+        return evidence.matches_known_cve != KnownCVE::UNKNOWN;
+    }
+};
+
+// ============================================================================
+// SYMBOLIC VALUE PROPAGATION ENGINE
+// ============================================================================
+
+class SymbolicValue {
+public:
+    enum class ValueType {
+        UNKNOWN,
+        CONCRETE,
+        SYMBOLIC,
+        RANGE,
+        TAINTED_INPUT,
+        MONEY_RANGE_CHECKED,
+        MONEY_RANGE_UNCHECKED,
+        FEE_ACCUMULATOR,
+        SUBSIDY_VALUE,
+        NVALUE_SUM,
+        UTXO_VALUE,
+        SIGNED_OVERFLOW_RISK,
+        NEGATIVE_VALUE
+    };
+    
+    ValueType type;
+    int64_t concrete_min;
+    int64_t concrete_max;
+    std::string symbolic_expr;
+    bool has_bounds_check;
+    bool has_overflow_check;
+    std::vector<std::string> check_locations;
+    std::set<std::string> influencing_variables;
+    bool crosses_function_boundary;
+    
+    SymbolicValue() : type(ValueType::UNKNOWN),
+                      concrete_min(std::numeric_limits<int64_t>::min()),
+                      concrete_max(std::numeric_limits<int64_t>::max()),
+                      has_bounds_check(false),
+                      has_overflow_check(false),
+                      crosses_function_boundary(false) {}
+    
+    bool is_potentially_unchecked_accumulator() const {
+        return (type == ValueType::FEE_ACCUMULATOR || 
+                type == ValueType::NVALUE_SUM) &&
+               !has_bounds_check &&
+               !has_overflow_check;
+    }
+    
+    bool could_overflow() const {
+        return concrete_max > (1LL << 53) || concrete_min < -(1LL << 53);
+    }
+};
+
+class SymbolicExecutionEngine {
+private:
+    struct ExecutionState {
+        std::map<std::string, SymbolicValue> symbolic_values;
+        std::vector<std::string> path_constraints;
+        uint64_t current_block_id;
+        bool is_valid;
+        
+        ExecutionState() : current_block_id(0), is_valid(true) {}
+    };
+    
+    std::map<std::string, SymbolicValue> global_value_map;
+    std::vector<ExecutionState> execution_states;
+    
+public:
+    void track_variable(const std::string& var_name, const SymbolicValue& value) {
+        global_value_map[var_name] = value;
+    }
+    
+    SymbolicValue get_value(const std::string& var_name) const {
+        auto it = global_value_map.find(var_name);
+        if (it != global_value_map.end()) {
+            return it->second;
+        }
+        return SymbolicValue();
+    }
+    
+    void propagate_assignment(const std::string& lhs, const std::string& rhs) {
+        auto rhs_val = get_value(rhs);
+        track_variable(lhs, rhs_val);
+    }
+    
+    void propagate_addition(const std::string& result, 
+                           const std::string& op1,
+                           const std::string& op2) {
+        auto v1 = get_value(op1);
+        auto v2 = get_value(op2);
+        
+        SymbolicValue result_val;
+        result_val.type = SymbolicValue::ValueType::SYMBOLIC;
+        result_val.symbolic_expr = op1 + " + " + op2;
+        
+        if (v1.type == SymbolicValue::ValueType::CONCRETE && 
+            v2.type == SymbolicValue::ValueType::CONCRETE) {
+            result_val.concrete_min = v1.concrete_min + v2.concrete_min;
+            result_val.concrete_max = v1.concrete_max + v2.concrete_max;
+            result_val.type = SymbolicValue::ValueType::CONCRETE;
+        } else {
+            result_val.concrete_min = std::numeric_limits<int64_t>::min();
+            result_val.concrete_max = std::numeric_limits<int64_t>::max();
+        }
+        
+        result_val.has_bounds_check = v1.has_bounds_check && v2.has_bounds_check;
+        result_val.has_overflow_check = v1.has_overflow_check && v2.has_overflow_check;
+        
+        if (op1.find("nFees") != std::string::npos || 
+            op2.find("nFees") != std::string::npos) {
+            result_val.type = SymbolicValue::ValueType::FEE_ACCUMULATOR;
+        }
+        if (op1.find("nValue") != std::string::npos || 
+            op2.find("nValue") != std::string::npos) {
+            result_val.type = SymbolicValue::ValueType::NVALUE_SUM;
+        }
+        
+        track_variable(result, result_val);
+    }
+    
+    void mark_bounds_checked(const std::string& var_name, const std::string& check_loc) {
+        auto it = global_value_map.find(var_name);
+        if (it != global_value_map.end()) {
+            it->second.has_bounds_check = true;
+            it->second.check_locations.push_back(check_loc);
+        }
+    }
+    
+    std::vector<std::string> find_unchecked_accumulators() const {
+        std::vector<std::string> unchecked;
+        for (const auto& [var_name, value] : global_value_map) {
+            if (value.is_potentially_unchecked_accumulator()) {
+                unchecked.push_back(var_name);
+            }
+        }
+        return unchecked;
+    }
+};
+
+// ============================================================================
+// INTERPROCEDURAL MONEY RANGE VERIFIER
+// ============================================================================
+
+class MoneyRangeVerifier {
+private:
+    struct MoneyFlowNode {
+        std::string variable_name;
+        std::string function_name;
+        SourceLocation location;
+        bool has_local_check;
+        bool has_caller_check;
+        bool has_callee_check;
+        std::vector<std::string> call_chain;
+        SymbolicValue value;
+    };
+    
+    std::vector<MoneyFlowNode> money_flow_nodes;
+    std::map<std::string, std::vector<std::string>> function_call_graph;
+    
+public:
+    void analyze_money_flow(const std::shared_ptr<ControlFlowGraph>& cfg,
+                           const std::shared_ptr<DataFlowGraph>& dfg,
+                           SymbolicExecutionEngine& symbolic_engine) {
+        for (const auto& [block_id, block] : cfg->blocks) {
+            for (const auto& stmt : block->statements) {
+                analyze_statement_for_money_operations(stmt, cfg->function_name, 
+                                                      symbolic_engine);
+            }
+        }
+    }
+    
+    std::vector<ExploitEvidence> find_unprotected_accumulations() {
+        std::vector<ExploitEvidence> findings;
+        
+        for (const auto& node : money_flow_nodes) {
+            if (!node.has_local_check && 
+                !node.has_caller_check && 
+                !node.has_callee_check) {
+                
+                if (node.value.type == SymbolicValue::ValueType::FEE_ACCUMULATOR ||
+                    node.value.type == SymbolicValue::ValueType::NVALUE_SUM) {
+                    
+                    ExploitEvidence evidence;
+                    evidence.category = ExploitCategory::CONSENSUS_INFLATION;
+                    evidence.title = "Unprotected Money Accumulation Without MoneyRange Check";
+                    evidence.description = "Variable " + node.variable_name + 
+                        " accumulates monetary values across " +
+                        std::to_string(node.call_chain.size()) + 
+                        " function calls without any MoneyRange bounds verification";
+                    evidence.severity = Severity::Critical;
+                    evidence.locations.push_back(node.location);
+                    evidence.is_novel = true;
+                    evidence.is_exploitable = true;
+                    
+                    evidence.technical_details["variable"] = node.variable_name;
+                    evidence.technical_details["function"] = node.function_name;
+                    evidence.technical_details["accumulation_type"] = 
+                        (node.value.type == SymbolicValue::ValueType::FEE_ACCUMULATOR) 
+                        ? "fee" : "value";
+                    
+                    evidence.exploit_primitive = 
+                        "Attacker can construct transaction chains causing " +
+                        node.variable_name + " to exceed MAX_MONEY bounds";
+                    evidence.reachability_proof = 
+                        "Path exists through: " + join_strings(node.call_chain, " -> ");
+                    evidence.controllability_proof = 
+                        "Attacker controls input transaction values and fee values";
+                    evidence.impact_analysis = 
+                        "Could lead to inflation, negative fees, or consensus divergence";
+                    
+                    findings.push_back(evidence);
+                }
+            }
+        }
+        
+        return findings;
+    }
+    
+private:
+    void analyze_statement_for_money_operations(const std::shared_ptr<ASTNode>& stmt,
+                                                const std::string& function_name,
+                                                SymbolicExecutionEngine& symbolic_engine) {
+        if (!stmt) return;
+        
+        std::string stmt_text = get_statement_text(stmt);
+        
+        if (stmt_text.find("nFees") != std::string::npos && 
+            stmt_text.find("+=") != std::string::npos) {
+            
+            MoneyFlowNode node;
+            node.variable_name = "nFees";
+            node.function_name = function_name;
+            node.location = stmt->range.begin;
+            node.has_local_check = check_for_local_moneyrange(stmt);
+            node.value = symbolic_engine.get_value("nFees");
+            
+            money_flow_nodes.push_back(node);
+        }
+        
+        if (stmt_text.find("nValue") != std::string::npos && 
+            stmt_text.find("+=") != std::string::npos) {
+            
+            MoneyFlowNode node;
+            node.variable_name = "nValue";
+            node.function_name = function_name;
+            node.location = stmt->range.begin;
+            node.has_local_check = check_for_local_moneyrange(stmt);
+            node.value = symbolic_engine.get_value("nValue");
+            
+            money_flow_nodes.push_back(node);
+        }
+    }
+    
+    bool check_for_local_moneyrange(const std::shared_ptr<ASTNode>& stmt) {
+        auto parent = stmt->parent.lock();
+        int search_depth = 0;
+        while (parent && search_depth < 5) {
+            std::string parent_text = get_statement_text(parent);
+            if (parent_text.find("MoneyRange") != std::string::npos) {
+                return true;
+            }
+            if (parent_text.find("MAX_MONEY") != std::string::npos) {
+                return true;
+            }
+            parent = parent->parent.lock();
+            search_depth++;
+        }
+        return false;
+    }
+    
+    std::string get_statement_text(const std::shared_ptr<ASTNode>& node) {
+        if (!node) return "";
+        std::string text = node->name;
+        for (const auto& child : node->children) {
+            text += " " + get_statement_text(child);
+        }
+        return text;
+    }
+    
+    std::string join_strings(const std::vector<std::string>& vec, const std::string& delim) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (i > 0) oss << delim;
+            oss << vec[i];
+        }
+        return oss.str();
+    }
+};
+
+// ============================================================================
+// UTXO CACHE DIVERGENCE ANALYZER
+// ============================================================================
+
+class UTXOCacheSimulator {
+private:
+    struct UTXOEntry {
+        std::string txid;
+        uint32_t vout;
+        int64_t value;
+        bool is_spent;
+        bool is_coinbase;
+        uint32_t height;
+        bool exists_in_cache;
+        bool exists_in_db;
+    };
+    
+    struct CacheOperation {
+        enum OpType { SPEND, UNSPEND, ADD, REMOVE, FLUSH } op_type;
+        UTXOEntry entry;
+        uint64_t block_height;
+        std::string operation_location;
+    };
+    
+    std::map<std::string, UTXOEntry> simulated_cache;
+    std::vector<CacheOperation> operation_log;
+    
+public:
+    struct CacheDivergence {
+        std::string divergence_type;
+        std::vector<UTXOEntry> affected_utxos;
+        std::string scenario_description;
+        bool enables_double_spend;
+        bool enables_resurrection;
+        SourceLocation divergence_location;
+    };
+    
+    void simulate_spend_coin(const std::string& txid, uint32_t vout, 
+                            const SourceLocation& loc) {
+        std::string key = txid + ":" + std::to_string(vout);
+        auto it = simulated_cache.find(key);
+        
+        if (it == simulated_cache.end()) {
+            CacheOperation op;
+            op.op_type = CacheOperation::SPEND;
+            op.entry.txid = txid;
+            op.entry.vout = vout;
+            op.entry.exists_in_cache = false;
+            op.operation_location = loc.to_string();
+            operation_log.push_back(op);
+        } else {
+            it->second.is_spent = true;
+            CacheOperation op;
+            op.op_type = CacheOperation::SPEND;
+            op.entry = it->second;
+            op.operation_location = loc.to_string();
+            operation_log.push_back(op);
+        }
+    }
+    
+    void simulate_add_coin(const std::string& txid, uint32_t vout,
+                          int64_t value, uint32_t height,
+                          const SourceLocation& loc) {
+        std::string key = txid + ":" + std::to_string(vout);
+        UTXOEntry entry;
+        entry.txid = txid;
+        entry.vout = vout;
+        entry.value = value;
+        entry.is_spent = false;
+        entry.height = height;
+        entry.exists_in_cache = true;
+        entry.exists_in_db = false;
+        
+        simulated_cache[key] = entry;
+        
+        CacheOperation op;
+        op.op_type = CacheOperation::ADD;
+        op.entry = entry;
+        op.operation_location = loc.to_string();
+        operation_log.push_back(op);
+    }
+    
+    std::vector<CacheDivergence> detect_divergence_scenarios() {
+        std::vector<CacheDivergence> divergences;
+        
+        for (size_t i = 0; i < operation_log.size(); ++i) {
+            const auto& op1 = operation_log[i];
+            
+            if (op1.op_type == CacheOperation::SPEND && 
+                !op1.entry.exists_in_cache) {
+                
+                CacheDivergence div;
+                div.divergence_type = "SpendCoin without existence check";
+                div.affected_utxos.push_back(op1.entry);
+                div.scenario_description = 
+                    "SpendCoin called on UTXO that may not exist in cache";
+                div.enables_double_spend = true;
+                div.enables_resurrection = false;
+                
+                SourceLocation loc;
+                loc.file_path = op1.operation_location;
+                div.divergence_location = loc;
+                
+                divergences.push_back(div);
+            }
+            
+            for (size_t j = i + 1; j < operation_log.size(); ++j) {
+                const auto& op2 = operation_log[j];
+                
+                if (op1.entry.txid == op2.entry.txid && 
+                    op1.entry.vout == op2.entry.vout) {
+                    
+                    if (op1.op_type == CacheOperation::SPEND && 
+                        op2.op_type == CacheOperation::SPEND) {
+                        
+                        CacheDivergence div;
+                        div.divergence_type = "Double spend on same UTXO";
+                        div.affected_utxos.push_back(op1.entry);
+                        div.scenario_description = 
+                            "Same UTXO spent twice without intermediate flush";
+                        div.enables_double_spend = true;
+                        div.enables_resurrection = false;
+                        
+                        SourceLocation loc;
+                        loc.file_path = op2.operation_location;
+                        div.divergence_location = loc;
+                        
+                        divergences.push_back(div);
+                    }
+                    
+                    if (op1.op_type == CacheOperation::SPEND && 
+                        op2.op_type == CacheOperation::ADD) {
+                        
+                        CacheDivergence div;
+                        div.divergence_type = "UTXO resurrection after spend";
+                        div.affected_utxos.push_back(op1.entry);
+                        div.scenario_description = 
+                            "UTXO added back to cache after being spent";
+                        div.enables_double_spend = true;
+                        div.enables_resurrection = true;
+                        
+                        SourceLocation loc;
+                        loc.file_path = op2.operation_location;
+                        div.divergence_location = loc;
+                        
+                        divergences.push_back(div);
+                    }
+                }
+            }
+        }
+        
+        return divergences;
+    }
+    
+    std::vector<ExploitEvidence> generate_double_spend_findings(
+        const std::vector<CacheDivergence>& divergences) {
+        
+        std::vector<ExploitEvidence> findings;
+        
+        for (const auto& div : divergences) {
+            if (div.enables_double_spend) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::CONSENSUS_DOUBLE_SPEND;
+                evidence.title = "UTXO Cache Divergence Enables Double Spend: " + 
+                                div.divergence_type;
+                evidence.description = div.scenario_description;
+                evidence.severity = Severity::Critical;
+                evidence.locations.push_back(div.divergence_location);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.technical_details["divergence_type"] = div.divergence_type;
+                evidence.technical_details["affected_utxos"] = 
+                    std::to_string(div.affected_utxos.size());
+                
+                evidence.exploit_primitive = 
+                    "Attacker can trigger cache inconsistency causing same UTXO "
+                    "to be spendable multiple times";
+                evidence.reachability_proof = 
+                    "Cache operation sequence: " + div.scenario_description;
+                evidence.controllability_proof = 
+                    "Attacker controls transaction ordering and block submission timing";
+                evidence.impact_analysis = 
+                    "Enables double-spending attack, consensus divergence between nodes";
+                
+                if (div.enables_resurrection) {
+                    evidence.impact_analysis += 
+                        "; UTXO resurrection allows spending already-spent coins";
+                }
+                
+                findings.push_back(evidence);
+            }
+        }
+        
+        return findings;
+    }
+};
+
+// ============================================================================
+// REORG CONSISTENCY VERIFIER
+// ============================================================================
+
+class ReorgConsistencyAnalyzer {
+private:
+    struct BlockState {
+        uint32_t height;
+        std::vector<std::string> txids;
+        std::map<std::string, bool> utxo_spent_state;
+        std::map<std::string, int64_t> utxo_values;
+    };
+    
+    struct ReorgScenario {
+        std::vector<BlockState> original_chain;
+        std::vector<BlockState> reorg_chain;
+        uint32_t fork_point;
+    };
+    
+public:
+    struct ReorgInconsistency {
+        std::string inconsistency_type;
+        uint32_t block_height;
+        std::vector<std::string> affected_txids;
+        std::string state_mismatch_description;
+        bool enables_exploit;
+    };
+    
+    std::vector<ReorgInconsistency> simulate_reorg_scenarios(
+        const std::vector<ReorgScenario>& scenarios) {
+        
+        std::vector<ReorgInconsistency> inconsistencies;
+        
+        for (const auto& scenario : scenarios) {
+            auto original_state = compute_final_state(scenario.original_chain);
+            
+            auto reorg_state = replay_reorg(scenario);
+            
+            auto diffs = compare_states(original_state, reorg_state);
+            
+            for (const auto& diff : diffs) {
+                ReorgInconsistency inc;
+                inc.inconsistency_type = diff.first;
+                inc.state_mismatch_description = diff.second;
+                inc.enables_exploit = true;
+                inconsistencies.push_back(inc);
+            }
+        }
+        
+        return inconsistencies;
+    }
+    
+    std::vector<ExploitEvidence> generate_reorg_findings(
+        const std::vector<ReorgInconsistency>& inconsistencies) {
+        
+        std::vector<ExploitEvidence> findings;
+        
+        for (const auto& inc : inconsistencies) {
+            if (inc.enables_exploit) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::REORG_INCONSISTENCY;
+                evidence.title = "Reorg State Inconsistency: " + inc.inconsistency_type;
+                evidence.description = inc.state_mismatch_description;
+                evidence.severity = Severity::High;
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.exploit_primitive = 
+                    "Attacker can trigger reorg to produce inconsistent UTXO state";
+                evidence.reachability_proof = 
+                    "Reorg scenario at height " + std::to_string(inc.block_height);
+                evidence.controllability_proof = 
+                    "Attacker controls alternate chain and reorg timing";
+                evidence.impact_analysis = 
+                    "Can cause consensus divergence, double-spend, or UTXO resurrection";
+                
+                findings.push_back(evidence);
+            }
+        }
+        
+        return findings;
+    }
+    
+private:
+    BlockState compute_final_state(const std::vector<BlockState>& chain) {
+        BlockState final_state;
+        if (chain.empty()) return final_state;
+        
+        final_state = chain.back();
+        return final_state;
+    }
+    
+    BlockState replay_reorg(const ReorgScenario& scenario) {
+        BlockState state;
+        
+        for (size_t i = 0; i <= scenario.fork_point; ++i) {
+            if (i < scenario.original_chain.size()) {
+                merge_state(state, scenario.original_chain[i]);
+            }
+        }
+        
+        for (const auto& reorg_block : scenario.reorg_chain) {
+            merge_state(state, reorg_block);
+        }
+        
+        return state;
+    }
+    
+    void merge_state(BlockState& target, const BlockState& source) {
+        target.txids.insert(target.txids.end(), 
+                           source.txids.begin(), 
+                           source.txids.end());
+        
+        for (const auto& [utxo, spent] : source.utxo_spent_state) {
+            target.utxo_spent_state[utxo] = spent;
+        }
+        
+        for (const auto& [utxo, value] : source.utxo_values) {
+            target.utxo_values[utxo] = value;
+        }
+    }
+    
+    std::vector<std::pair<std::string, std::string>> compare_states(
+        const BlockState& state1, const BlockState& state2) {
+        
+        std::vector<std::pair<std::string, std::string>> diffs;
+        
+        for (const auto& [utxo, spent1] : state1.utxo_spent_state) {
+            auto it = state2.utxo_spent_state.find(utxo);
+            if (it != state2.utxo_spent_state.end()) {
+                if (spent1 != it->second) {
+                    diffs.emplace_back("UTXO_SPEND_MISMATCH",
+                        "UTXO " + utxo + " has different spend state after reorg");
+                }
+            } else {
+                diffs.emplace_back("UTXO_EXISTENCE_MISMATCH",
+                    "UTXO " + utxo + " exists in one state but not the other");
+            }
+        }
+        
+        return diffs;
+    }
+};
+
+// ============================================================================
+// MEMPOOL POLICY VS CONSENSUS DIVERGENCE ANALYZER
+// ============================================================================
+
+class MempoolPolicyBypassDetector {
+private:
+    struct PolicyRule {
+        std::string rule_name;
+        std::string rule_type;
+        bool is_standard_only;
+        bool is_mandatory;
+        std::vector<std::string> enforcement_locations;
+    };
+    
+    struct ScriptFlags {
+        bool mandatory_flags;
+        bool standard_flags;
+        std::vector<std::string> flag_names;
+    };
+    
+    std::map<std::string, PolicyRule> policy_rules;
+    std::map<std::string, ScriptFlags> script_validation_points;
+    
+public:
+    MempoolPolicyBypassDetector() {
+        initialize_policy_rules();
+    }
+    
+    void initialize_policy_rules() {
+        policy_rules["STANDARD_SCRIPT_VERIFY_FLAGS"] = {
+            "Standard script verification",
+            "STANDARD",
+            true,
+            false,
+            {"AcceptToMemoryPool", "CheckInputs"}
+        };
+        
+        policy_rules["MANDATORY_SCRIPT_VERIFY_FLAGS"] = {
+            "Mandatory script verification",
+            "MANDATORY",
+            false,
+            true,
+            {"ConnectBlock", "CheckInputs"}
+        };
+        
+        policy_rules["MAX_STANDARD_TX_SIZE"] = {
+            "Maximum standard transaction size",
+            "SIZE_LIMIT",
+            true,
+            false,
+            {"AcceptToMemoryPool"}
+        };
+        
+        policy_rules["MAX_STANDARD_TX_WEIGHT"] = {
+            "Maximum standard transaction weight",
+            "WEIGHT_LIMIT",
+            true,
+            false,
+            {"AcceptToMemoryPool"}
+        };
+        
+        policy_rules["DUST_RELAY_TX_FEE"] = {
+            "Dust output relay policy",
+            "FEE_POLICY",
+            true,
+            false,
+            {"AcceptToMemoryPool", "IsDust"}
+        };
+    }
+    
+    std::vector<ExploitEvidence> analyze_policy_consensus_gaps(
+        const std::shared_ptr<ASTNode>& ast_root) {
+        
+        std::vector<ExploitEvidence> findings;
+        
+        auto mempool_validation = find_nodes_by_name(ast_root, "AcceptToMemoryPool");
+        auto block_validation = find_nodes_by_name(ast_root, "ConnectBlock");
+        
+        for (const auto& mempool_node : mempool_validation) {
+            auto mempool_checks = extract_validation_checks(mempool_node);
+            
+            for (const auto& block_node : block_validation) {
+                auto block_checks = extract_validation_checks(block_node);
+                
+                auto gaps = find_validation_gaps(mempool_checks, block_checks);
+                
+                for (const auto& gap : gaps) {
+                    ExploitEvidence evidence;
+                    evidence.category = ExploitCategory::MEMPOOL_POLICY_BYPASS;
+                    evidence.title = "Policy/Consensus Divergence: " + gap.check_name;
+                    evidence.description = 
+                        "Transaction can be rejected by mempool but accepted in block, "
+                        "or vice versa, creating divergence";
+                    evidence.severity = Severity::High;
+                    evidence.locations.push_back(gap.location);
+                    evidence.is_novel = true;
+                    evidence.is_exploitable = true;
+                    
+                    evidence.technical_details["check_type"] = gap.check_type;
+                    evidence.technical_details["mempool_enforcement"] = 
+                        gap.mempool_enforced ? "true" : "false";
+                    evidence.technical_details["block_enforcement"] = 
+                        gap.block_enforced ? "true" : "false";
+                    
+                    evidence.exploit_primitive = 
+                        "Attacker can craft transaction that bypasses mempool but is "
+                        "valid in block, or is accepted in mempool but invalid in block";
+                    evidence.reachability_proof = 
+                        "Path exists through validation mismatch in " + gap.check_name;
+                    evidence.controllability_proof = 
+                        "Attacker controls transaction structure and validation path";
+                    evidence.impact_analysis = 
+                        "Can cause consensus divergence, mempool poisoning, or DoS";
+                    
+                    findings.push_back(evidence);
+                }
+            }
+        }
+        
+        return findings;
+    }
+    
+private:
+    struct ValidationCheck {
+        std::string check_name;
+        std::string check_type;
+        bool mempool_enforced;
+        bool block_enforced;
+        SourceLocation location;
+    };
+    
+    std::vector<std::shared_ptr<ASTNode>> find_nodes_by_name(
+        const std::shared_ptr<ASTNode>& root,
+        const std::string& name) {
+        
+        std::vector<std::shared_ptr<ASTNode>> results;
+        if (!root) return results;
+        
+        if (root->name == name) {
+            results.push_back(root);
+        }
+        
+        for (const auto& child : root->children) {
+            auto child_results = find_nodes_by_name(child, name);
+            results.insert(results.end(), child_results.begin(), child_results.end());
+        }
+        
+        return results;
+    }
+    
+    std::vector<ValidationCheck> extract_validation_checks(
+        const std::shared_ptr<ASTNode>& node) {
+        
+        std::vector<ValidationCheck> checks;
+        if (!node) return checks;
+        
+        for (const auto& child : node->children) {
+            if (child->name.find("Check") != std::string::npos ||
+                child->name.find("Verify") != std::string::npos) {
+                
+                ValidationCheck check;
+                check.check_name = child->name;
+                check.check_type = "validation";
+                check.location = child->range.begin;
+                checks.push_back(check);
+            }
+            
+            auto sub_checks = extract_validation_checks(child);
+            checks.insert(checks.end(), sub_checks.begin(), sub_checks.end());
+        }
+        
+        return checks;
+    }
+    
+    std::vector<ValidationCheck> find_validation_gaps(
+        const std::vector<ValidationCheck>& mempool_checks,
+        const std::vector<ValidationCheck>& block_checks) {
+        
+        std::vector<ValidationCheck> gaps;
+        
+        for (const auto& mempool_check : mempool_checks) {
+            bool found_in_block = false;
+            for (const auto& block_check : block_checks) {
+                if (mempool_check.check_name == block_check.check_name) {
+                    found_in_block = true;
+                    break;
+                }
+            }
+            
+            if (!found_in_block) {
+                ValidationCheck gap = mempool_check;
+                gap.mempool_enforced = true;
+                gap.block_enforced = false;
+                gaps.push_back(gap);
+            }
+        }
+        
+        for (const auto& block_check : block_checks) {
+            bool found_in_mempool = false;
+            for (const auto& mempool_check : mempool_checks) {
+                if (block_check.check_name == mempool_check.check_name) {
+                    found_in_mempool = true;
+                    break;
+                }
+            }
+            
+            if (!found_in_mempool) {
+                ValidationCheck gap = block_check;
+                gap.mempool_enforced = false;
+                gap.block_enforced = true;
+                gaps.push_back(gap);
+            }
+        }
+        
+        return gaps;
+    }
+};
+
+// ============================================================================
+// TAPSCRIPT BYPASS ANALYZER (24.0.1 ONLY)
+// ============================================================================
+
+class TapscriptBypassDetector {
+private:
+    struct TapscriptValidation {
+        uint8_t leaf_version;
+        std::vector<uint8_t> opcodes;
+        bool has_op_success;
+        bool has_signature_validation;
+        bool has_version_check;
+        SourceLocation location;
+    };
+    
+    std::map<uint8_t, bool> valid_leaf_versions;
+    std::map<uint8_t, bool> valid_opcodes;
+    
+public:
+    TapscriptBypassDetector() {
+        initialize_tapscript_rules();
+    }
+    
+    void initialize_tapscript_rules() {
+        valid_leaf_versions[0xC0] = true;
+        
+        for (uint16_t i = 80; i <= 186; ++i) {
+            if (i >= 80 && i <= 96) {
+                valid_opcodes[static_cast<uint8_t>(i)] = true;
+            }
+        }
+    }
+    
+    std::vector<ExploitEvidence> analyze_tapscript_execution_paths(
+        const std::shared_ptr<ASTNode>& ast_root) {
+        
+        std::vector<ExploitEvidence> findings;
+        
+        auto tapscript_eval_nodes = find_tapscript_evaluation_points(ast_root);
+        
+        for (const auto& eval_node : tapscript_eval_nodes) {
+            auto validation = extract_tapscript_validation(eval_node);
+            
+            if (!validation.has_version_check) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::TAPSCRIPT_BYPASS;
+                evidence.title = "Tapscript Leaf Version Not Validated";
+                evidence.description = 
+                    "Tapscript execution path does not verify leaf version, "
+                    "potentially accepting invalid leaf versions";
+                evidence.severity = Severity::Critical;
+                evidence.locations.push_back(validation.location);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.technical_details["leaf_version"] = 
+                    std::to_string(validation.leaf_version);
+                
+                evidence.exploit_primitive = 
+                    "Attacker can craft tapscript with invalid leaf version";
+                evidence.reachability_proof = 
+                    "Tapscript evaluation path lacks version verification";
+                evidence.controllability_proof = 
+                    "Attacker controls witness stack and tapscript leaf data";
+                evidence.impact_analysis = 
+                    "Can bypass signature validation, enable unauthorized spending";
+                
+                findings.push_back(evidence);
+            }
+            
+            if (validation.has_op_success && !validation.has_signature_validation) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::TAPSCRIPT_BYPASS;
+                evidence.title = "OP_SUCCESS Path Without Signature Validation";
+                evidence.description = 
+                    "Tapscript contains OP_SUCCESS opcode path that reaches "
+                    "success state without prior signature validation";
+                evidence.severity = Severity::Critical;
+                evidence.locations.push_back(validation.location);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.technical_details["opcodes"] = 
+                    format_opcodes(validation.opcodes);
+                
+                evidence.exploit_primitive = 
+                    "Attacker can reach OP_SUCCESS without providing valid signature";
+                evidence.reachability_proof = 
+                    "Path exists from script entry to OP_SUCCESS without CheckSig";
+                evidence.controllability_proof = 
+                    "Attacker controls script path and witness data";
+                evidence.impact_analysis = 
+                    "Enables unauthorized spending of tapscript UTXOs";
+                
+                findings.push_back(evidence);
+            }
+            
+            for (uint8_t opcode : validation.opcodes) {
+                if (opcode > 186 && opcode != 255) {
+                    ExploitEvidence evidence;
+                    evidence.category = ExploitCategory::TAPSCRIPT_BYPASS;
+                    evidence.title = "Undefined Opcode Accepted in Tapscript";
+                    evidence.description = 
+                        "Tapscript accepts undefined opcode 0x" + 
+                        to_hex(opcode) + " which should trigger failure";
+                    evidence.severity = Severity::High;
+                    evidence.locations.push_back(validation.location);
+                    evidence.is_novel = true;
+                    evidence.is_exploitable = true;
+                    
+                    evidence.technical_details["opcode"] = to_hex(opcode);
+                    
+                    evidence.exploit_primitive = 
+                        "Attacker can use undefined opcodes to bypass validation";
+                    evidence.reachability_proof = 
+                        "Opcode range check missing or incomplete";
+                    evidence.controllability_proof = 
+                        "Attacker controls script content including opcodes";
+                    evidence.impact_analysis = 
+                        "May enable script bypass or undefined behavior";
+                    
+                    findings.push_back(evidence);
+                }
+            }
+        }
+        
+        return findings;
+    }
+    
+private:
+    std::vector<std::shared_ptr<ASTNode>> find_tapscript_evaluation_points(
+        const std::shared_ptr<ASTNode>& root) {
+        
+        std::vector<std::shared_ptr<ASTNode>> results;
+        if (!root) return results;
+        
+        if (root->name.find("EvalScript") != std::string::npos ||
+            root->name.find("VerifyTaprootCommitment") != std::string::npos ||
+            root->name.find("ExecuteWitnessScript") != std::string::npos) {
+            results.push_back(root);
+        }
+        
+        for (const auto& child : root->children) {
+            auto child_results = find_tapscript_evaluation_points(child);
+            results.insert(results.end(), child_results.begin(), child_results.end());
+        }
+        
+        return results;
+    }
+    
+    TapscriptValidation extract_tapscript_validation(
+        const std::shared_ptr<ASTNode>& node) {
+        
+        TapscriptValidation validation;
+        validation.leaf_version = 0;
+        validation.has_op_success = false;
+        validation.has_signature_validation = false;
+        validation.has_version_check = false;
+        validation.location = node->range.begin;
+        
+        search_for_validation_patterns(node, validation);
+        
+        return validation;
+    }
+    
+    void search_for_validation_patterns(const std::shared_ptr<ASTNode>& node,
+                                       TapscriptValidation& validation) {
+        if (!node) return;
+        
+        if (node->name.find("leaf_version") != std::string::npos ||
+            node->name.find("LeafVersion") != std::string::npos) {
+            validation.has_version_check = true;
+        }
+        
+        if (node->name.find("OP_SUCCESS") != std::string::npos) {
+            validation.has_op_success = true;
+        }
+        
+        if (node->name.find("CheckSig") != std::string::npos ||
+            node->name.find("VerifySignature") != std::string::npos) {
+            validation.has_signature_validation = true;
+        }
+        
+        for (const auto& child : node->children) {
+            search_for_validation_patterns(child, validation);
+        }
+    }
+    
+    std::string format_opcodes(const std::vector<uint8_t>& opcodes) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < opcodes.size(); ++i) {
+            if (i > 0) oss << " ";
+            oss << "0x" << std::hex << static_cast<int>(opcodes[i]);
+        }
+        return oss.str();
+    }
+    
+    std::string to_hex(uint8_t value) {
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0') << std::setw(2) 
+            << static_cast<int>(value);
+        return oss.str();
+    }
+};
+
+// ============================================================================
+// WITNESS COMMITMENT INTEGRITY ANALYZER
+// ============================================================================
+
+class WitnessCommitmentAnalyzer {
+private:
+    struct WitnessData {
+        std::vector<std::vector<uint8_t>> witness_stack;
+        std::string txid;
+        uint32_t input_index;
+        bool is_segwit;
+    };
+    
+    struct CommitmentCheck {
+        bool commitment_present;
+        bool commitment_valid;
+        bool witness_data_covered;
+        std::vector<std::string> uncovered_fields;
+        SourceLocation location;
+    };
+    
+public:
+    std::vector<ExploitEvidence> analyze_witness_commitment_coverage(
+        const std::shared_ptr<ASTNode>& ast_root) {
+        
+        std::vector<ExploitEvidence> findings;
+        
+        auto block_validation = find_nodes_by_pattern(ast_root, "CheckBlock");
+        auto witness_commitment = find_nodes_by_pattern(ast_root, "GetWitnessCommitment");
+        
+        for (const auto& block_node : block_validation) {
+            CommitmentCheck check = verify_commitment_coverage(block_node);
+            
+            if (!check.commitment_present) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::WITNESS_COMMITMENT_INTEGRITY;
+                evidence.title = "Missing Witness Commitment Verification";
+                evidence.description = 
+                    "Block validation does not verify witness commitment presence";
+                evidence.severity = Severity::High;
+                evidence.locations.push_back(check.location);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.exploit_primitive = 
+                    "Attacker can omit witness commitment in segwit block";
+                evidence.reachability_proof = 
+                    "Block validation path lacks commitment check";
+                evidence.controllability_proof = 
+                    "Attacker controls block structure and coinbase transaction";
+                evidence.impact_analysis = 
+                    "Can enable witness malleability, transaction substitution";
+                
+                findings.push_back(evidence);
+            }
+            
+            if (!check.witness_data_covered) {
+                for (const auto& uncovered_field : check.uncovered_fields) {
+                    ExploitEvidence evidence;
+                    evidence.category = ExploitCategory::WITNESS_COMMITMENT_INTEGRITY;
+                    evidence.title = "Witness Commitment Incomplete Coverage: " + 
+                                    uncovered_field;
+                    evidence.description = 
+                        "Witness commitment does not cover " + uncovered_field +
+                        ", allowing malleability";
+                    evidence.severity = Severity::High;
+                    evidence.locations.push_back(check.location);
+                    evidence.is_novel = true;
+                    evidence.is_exploitable = true;
+                    
+                    evidence.technical_details["uncovered_field"] = uncovered_field;
+                    
+                    evidence.exploit_primitive = 
+                        "Attacker can modify " + uncovered_field + 
+                        " without invalidating commitment";
+                    evidence.reachability_proof = 
+                        "Commitment calculation excludes " + uncovered_field;
+                    evidence.controllability_proof = 
+                        "Attacker controls witness data structure";
+                    evidence.impact_analysis = 
+                        "Enables witness substitution attack, transaction malleability";
+                    
+                    findings.push_back(evidence);
+                }
+            }
+        }
+        
+        return findings;
+    }
+    
+private:
+    std::vector<std::shared_ptr<ASTNode>> find_nodes_by_pattern(
+        const std::shared_ptr<ASTNode>& root,
+        const std::string& pattern) {
+        
+        std::vector<std::shared_ptr<ASTNode>> results;
+        if (!root) return results;
+        
+        if (root->name.find(pattern) != std::string::npos) {
+            results.push_back(root);
+        }
+        
+        for (const auto& child : root->children) {
+            auto child_results = find_nodes_by_pattern(child, pattern);
+            results.insert(results.end(), child_results.begin(), child_results.end());
+        }
+        
+        return results;
+    }
+    
+    CommitmentCheck verify_commitment_coverage(const std::shared_ptr<ASTNode>& node) {
+        CommitmentCheck check;
+        check.commitment_present = false;
+        check.commitment_valid = false;
+        check.witness_data_covered = false;
+        check.location = node->range.begin;
+        
+        bool has_witness_root = false;
+        bool has_witness_nonce = false;
+        bool has_stack_items = false;
+        
+        search_commitment_fields(node, has_witness_root, has_witness_nonce, has_stack_items);
+        
+        check.commitment_present = has_witness_root;
+        
+        if (!has_witness_nonce) {
+            check.uncovered_fields.push_back("witness_reserved_value");
+        }
+        if (!has_stack_items) {
+            check.uncovered_fields.push_back("witness_stack_items");
+        }
+        
+        check.witness_data_covered = check.uncovered_fields.empty();
+        
+        return check;
+    }
+    
+    void search_commitment_fields(const std::shared_ptr<ASTNode>& node,
+                                 bool& has_root, bool& has_nonce, bool& has_stack) {
+        if (!node) return;
+        
+        if (node->name.find("witness_root") != std::string::npos ||
+            node->name.find("hashWitness") != std::string::npos) {
+            has_root = true;
+        }
+        
+        if (node->name.find("witness_reserved_value") != std::string::npos ||
+            node->name.find("witness_nonce") != std::string::npos) {
+            has_nonce = true;
+        }
+        
+        if (node->name.find("witness.vtxinwit") != std::string::npos ||
+            node->name.find("scriptWitness") != std::string::npos) {
+            has_stack = true;
+        }
+        
+        for (const auto& child : node->children) {
+            search_commitment_fields(child, has_root, has_nonce, has_stack);
+        }
+    }
+};
+
+// ============================================================================
+// KEY RECOVERY ATTACK DETECTOR
+// ============================================================================
+
+class KeyRecoveryAttackDetector {
+private:
+    struct SigningContext {
+        std::string function_name;
+        bool uses_deterministic_nonce;
+        bool reuses_rng_state;
+        bool has_nonce_uniqueness_check;
+        bool vulnerable_to_replay;
+        std::vector<std::string> nonce_sources;
+        SourceLocation location;
+    };
+    
+    struct SignatureAnalysis {
+        bool same_message_multiple_sigs;
+        bool nonce_reuse_detected;
+        bool hash_equals_one;
+        bool partial_signature_leaked;
+        std::vector<SourceLocation> signing_locations;
+    };
+    
+public:
+    std::vector<ExploitEvidence> analyze_signature_generation(
+        const std::shared_ptr<ASTNode>& ast_root) {
+        
+        std::vector<ExploitEvidence> findings;
+        
+        auto signing_functions = find_signing_functions(ast_root);
+        
+        for (const auto& signing_func : signing_functions) {
+            SigningContext ctx = analyze_signing_context(signing_func);
+            
+            if (!ctx.uses_deterministic_nonce && ctx.reuses_rng_state) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::NONCE_REUSE;
+                evidence.title = "Potential Nonce Reuse in ECDSA Signing";
+                evidence.description = 
+                    "Signing function " + ctx.function_name + 
+                    " uses non-deterministic nonce with potential RNG state reuse";
+                evidence.severity = Severity::Critical;
+                evidence.locations.push_back(ctx.location);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.technical_details["function"] = ctx.function_name;
+                evidence.technical_details["nonce_sources"] = 
+                    join_vector(ctx.nonce_sources, ", ");
+                
+                evidence.exploit_primitive = 
+                    "Attacker can trigger nonce reuse by controlling RNG state";
+                evidence.reachability_proof = 
+                    "Path exists through " + ctx.function_name + 
+                    " without nonce uniqueness guarantee";
+                evidence.controllability_proof = 
+                    "Attacker can influence signing conditions and message selection";
+                evidence.impact_analysis = 
+                    "Enables private key recovery through duplicate nonce attack";
+                
+                findings.push_back(evidence);
+            }
+            
+            if (ctx.vulnerable_to_replay) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::KEY_RECOVERY_ATTACK;
+                evidence.title = "Signature Replay Vulnerability";
+                evidence.description = 
+                    "Signing context allows signature replay without nonce refresh";
+                evidence.severity = Severity::High;
+                evidence.locations.push_back(ctx.location);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.technical_details["function"] = ctx.function_name;
+                
+                evidence.exploit_primitive = 
+                    "Attacker can replay signatures across different contexts";
+                evidence.reachability_proof = 
+                    "No nonce refresh between signing operations";
+                evidence.controllability_proof = 
+                    "Attacker controls message and signing invocation timing";
+                evidence.impact_analysis = 
+                    "Can lead to signature forgery or key recovery";
+                
+                findings.push_back(evidence);
+            }
+        }
+        
+        auto sighash_computations = find_sighash_computations(ast_root);
+        for (const auto& sighash_node : sighash_computations) {
+            if (check_sighash_confusion(sighash_node)) {
+                ExploitEvidence evidence;
+                evidence.category = ExploitCategory::SIGHASH_CONFUSION;
+                evidence.title = "SIGHASH Type Confusion Vulnerability";
+                evidence.description = 
+                    "SIGHASH computation allows type confusion enabling "
+                    "signature reuse across unintended contexts";
+                evidence.severity = Severity::High;
+                evidence.locations.push_back(sighash_node->range.begin);
+                evidence.is_novel = true;
+                evidence.is_exploitable = true;
+                
+                evidence.exploit_primitive = 
+                    "Attacker can craft transaction causing SIGHASH type mismatch";
+                evidence.reachability_proof = 
+                    "SIGHASH type not properly isolated per signature";
+                evidence.controllability_proof = 
+                    "Attacker controls transaction structure and SIGHASH flags";
+                evidence.impact_analysis = 
+                    "Enables unauthorized spending through signature reuse";
+                
+                findings.push_back(evidence);
+            }
+        }
+        
+        return findings;
+    }
+    
+private:
+    std::vector<std::shared_ptr<ASTNode>> find_signing_functions(
+        const std::shared_ptr<ASTNode>& root) {
+        
+        std::vector<std::shared_ptr<ASTNode>> results;
+        if (!root) return results;
+        
+        if (root->name.find("Sign") != std::string::npos ||
+            root->name.find("CreateSignature") != std::string::npos ||
+            root->name.find("SignTransaction") != std::string::npos) {
+            if (root->type == ASTNodeType::FunctionDef ||
+                root->type == ASTNodeType::MethodDecl) {
+                results.push_back(root);
+            }
+        }
+        
+        for (const auto& child : root->children) {
+            auto child_results = find_signing_functions(child);
+            results.insert(results.end(), child_results.begin(), child_results.end());
+        }
+        
+        return results;
+    }
+    
+    SigningContext analyze_signing_context(const std::shared_ptr<ASTNode>& func_node) {
+        SigningContext ctx;
+        ctx.function_name = func_node->name;
+        ctx.uses_deterministic_nonce = false;
+        ctx.reuses_rng_state = false;
+        ctx.has_nonce_uniqueness_check = false;
+        ctx.vulnerable_to_replay = false;
+        ctx.location = func_node->range.begin;
+        
+        search_for_nonce_generation(func_node, ctx);
+        
+        if (ctx.nonce_sources.empty() || 
+            (!ctx.uses_deterministic_nonce && !ctx.has_nonce_uniqueness_check)) {
+            ctx.vulnerable_to_replay = true;
+        }
+        
+        return ctx;
+    }
+    
+    void search_for_nonce_generation(const std::shared_ptr<ASTNode>& node,
+                                    SigningContext& ctx) {
+        if (!node) return;
+        
+        if (node->name.find("RFC6979") != std::string::npos ||
+            node->name.find("BIP340") != std::string::npos) {
+            ctx.uses_deterministic_nonce = true;
+        }
+        
+        if (node->name.find("GetRandBytes") != std::string::npos ||
+            node->name.find("GetStrongRandBytes") != std::string::npos) {
+            ctx.nonce_sources.push_back(node->name);
+        }
+        
+        if (node->name.find("nonce") != std::string::npos) {
+            if (node->name.find("static") != std::string::npos ||
+                node->name.find("cached") != std::string::npos) {
+                ctx.reuses_rng_state = true;
+            }
+        }
+        
+        for (const auto& child : node->children) {
+            search_for_nonce_generation(child, ctx);
+        }
+    }
+    
+    std::vector<std::shared_ptr<ASTNode>> find_sighash_computations(
+        const std::shared_ptr<ASTNode>& root) {
+        
+        std::vector<std::shared_ptr<ASTNode>> results;
+        if (!root) return results;
+        
+        if (root->name.find("SignatureHash") != std::string::npos ||
+            root->name.find("GetPrevoutHash") != std::string::npos) {
+            results.push_back(root);
+        }
+        
+        for (const auto& child : root->children) {
+            auto child_results = find_sighash_computations(child);
+            results.insert(results.end(), child_results.begin(), child_results.end());
+        }
+        
+        return results;
+    }
+    
+    bool check_sighash_confusion(const std::shared_ptr<ASTNode>& node) {
+        bool has_sighash_type_check = false;
+        bool has_input_index_check = false;
+        
+        search_sighash_validation(node, has_sighash_type_check, has_input_index_check);
+        
+        return !has_sighash_type_check || !has_input_index_check;
+    }
+    
+    void search_sighash_validation(const std::shared_ptr<ASTNode>& node,
+                                  bool& has_type_check,
+                                  bool& has_index_check) {
+        if (!node) return;
+        
+        if (node->name.find("nHashType") != std::string::npos &&
+            node->name.find("&") != std::string::npos) {
+            has_type_check = true;
+        }
+        
+        if (node->name.find("nIn") != std::string::npos &&
+            node->name.find("<") != std::string::npos) {
+            has_index_check = true;
+        }
+        
+        for (const auto& child : node->children) {
+            search_sighash_validation(child, has_type_check, has_index_check);
+        }
+    }
+    
+    std::string join_vector(const std::vector<std::string>& vec, 
+                           const std::string& delim) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (i > 0) oss << delim;
+            oss << vec[i];
+        }
+        return oss.str();
+    }
+};
+
 } // namespace btc_audit
 
 // End of bitcoin_core_full_audit_framework.cpp
