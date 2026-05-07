@@ -555,6 +555,7 @@ struct Finding {
     std::string detailed_description;
     std::string mitigation_found;
     uint64_t taint_record_id;
+    std::string novelty_tag;
 
     Finding() : finding_id(0), issue_type(IssueType::PlaintextPasswordRetention),
                 classification(Classification::Inconclusive),
@@ -596,6 +597,10 @@ struct Finding {
             case IssueType::BackupLeakage: return "backup_leakage";
             case IssueType::ShutdownWipeMissing: return "shutdown_wipe_missing";
             case IssueType::KeypoolLeakage: return "keypool_leakage";
+            case IssueType::WalletLeakage: return "wallet_leakage";
+            case IssueType::InflationRisk: return "inflation_risk";
+            case IssueType::ConsensusInflation: return "consensus_inflation";
+            case IssueType::DoS: return "dos";
         }
         return "unknown";
     }
@@ -11520,145 +11525,27 @@ private:
 // SECTION 69: NoveltyExpansionOrchestrator
 // ============================================================================
 
+class PackageRelayDoubleSpendAnalyzer;
+class UTXOCacheDivergenceDetector;
+class ReorgSpendReplayDetector;
+class ValueAccountingTracer;
+class WitnessAccountingInflationDetector;
+class WalletSecretLifetimeTracker;
+class IterationCountFingerprintEngine;
+class HistoricalIssueDatabase;
+class NoveltyClassifier;
+class DuplicateRootCauseCollapser;
+class NoveltyConfidenceScorer;
+class DifferentialVersionAnalyzer;
+class WalletOraclePoCGenerator;
+class EnhancedReportEmitter;
+
 class NoveltyExpansionOrchestrator {
 public:
-    void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings) {
-        Logger::instance().info("NoveltyExpansionOrchestrator::run: starting comprehensive audit across all releases");
-        
-        auto start_time = std::chrono::steady_clock::now();
-        
-        std::vector<std::string> versions = {"0.14.1", "0.17.0", "0.18.1", "0.20.0", "24.0.1", "31.0"};
-        
-        for (const auto& version : versions) {
-            Logger::instance().info("NoveltyExpansionOrchestrator: processing version " + version);
-            
-            Release* target_release = nullptr;
-            for (auto& release : releases) {
-                if (release.name == version) {
-                    target_release = &release;
-                    break;
-                }
-            }
-            
-            if (!target_release) {
-                Logger::instance().warn("NoveltyExpansionOrchestrator: version " + version + " not found in releases");
-                continue;
-            }
-            
-            for (auto& tu : target_release->translation_units) {
-                PackageRelayDoubleSpendAnalyzer pdsa;
-                auto f1 = pdsa.analyze(&tu);
-                all_findings.insert(all_findings.end(), f1.begin(), f1.end());
-                
-                UTXOCacheDivergenceDetector ucd;
-                auto f2 = ucd.analyze(&tu);
-                all_findings.insert(all_findings.end(), f2.begin(), f2.end());
-                
-                ReorgSpendReplayDetector rsr;
-                auto f3 = rsr.analyze(&tu);
-                all_findings.insert(all_findings.end(), f3.begin(), f3.end());
-                
-                ValueAccountingTracer vat;
-                auto f4 = vat.analyze(&tu);
-                all_findings.insert(all_findings.end(), f4.begin(), f4.end());
-                
-                WitnessAccountingInflationDetector waid;
-                auto f5 = waid.analyze(&tu);
-                all_findings.insert(all_findings.end(), f5.begin(), f5.end());
-                
-                WalletSecretLifetimeTracker wslt;
-                auto f6 = wslt.analyze(&tu);
-                all_findings.insert(all_findings.end(), f6.begin(), f6.end());
-                
-                IterationCountFingerprintEngine icfe;
-                auto f7 = icfe.analyze(&tu);
-                all_findings.insert(all_findings.end(), f7.begin(), f7.end());
-            }
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: collected " + std::to_string(all_findings.size()) + " raw findings");
-        
-        NoveltyClassifier nc;
-        for (auto& finding : all_findings) {
-            auto score = nc.classify_finding(finding);
-            finding.novelty_tag = novelty_status_to_string(score.status);
-            
-            if (score.status == NoveltyStatus::DesignBehavior || score.status == NoveltyStatus::Noise) {
-                finding.classification = Classification::NonExploitable;
-                continue;
-            }
-        }
-        
-        HistoricalIssueDatabase hdb;
-        for (auto& finding : all_findings) {
-            if (hdb.is_known_vulnerability(finding)) {
-                finding.novelty_tag = "HistoricallyKnown";
-            }
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: collapsing duplicates");
-        DuplicateRootCauseCollapser drcc;
-        auto collapsed = drcc.collapse_findings(all_findings);
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: scoring novelty confidence");
-        NoveltyConfidenceScorer ncs;
-        for (auto& f : collapsed) {
-            ncs.score_finding(f);
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: analyzing cross-version evolution");
-        DifferentialVersionAnalyzer dva;
-        for (auto& f : collapsed) {
-            dva.classify_finding_evolution(f);
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: generating oracle PoC");
-        WalletOraclePoCGenerator poc_gen;
-        auto analysis = poc_gen.analyze_wallet_for_oracle(releases);
-        
-        if (analysis.oracle_viable) {
-            std::string script = poc_gen.generate_poc_script(analysis);
-            std::ofstream poc_file("poc_padding_oracle.py");
-            poc_file << script;
-            poc_file.close();
-            Logger::instance().info("NoveltyExpansionOrchestrator: PoC script written to poc_padding_oracle.py");
-        }
-        
-        auto end_time = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-        int minutes = duration.count() / 60;
-        int seconds = duration.count() % 60;
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: emitting enhanced report");
-        EnhancedReportEmitter ere;
-        auto summary = ere.compute_summary(collapsed);
-        ere.set_summary(summary);
-        ere.set_oracle_analysis(
-            analysis.oracle_viable,
-            analysis.kdf_method,
-            analysis.iteration_count,
-            analysis.gpu_guesses_per_sec,
-            analysis.recommended_attack,
-            analysis.estimated_queries
-        );
-        ere.set_analysis_time(minutes, seconds);
-        ere.emit_json_report(collapsed);
-        ere.log_completion_block();
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator::run: complete");
-    }
+    void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings);
     
 private:
-    std::string novelty_status_to_string(NoveltyStatus status) {
-        switch (status) {
-            case NoveltyStatus::Novel: return "Novel";
-            case NoveltyStatus::KnownIssue: return "KnownIssue";
-            case NoveltyStatus::DesignBehavior: return "DesignBehavior";
-            case NoveltyStatus::Noise: return "Noise";
-            case NoveltyStatus::HistoricalCVE: return "HistoricalCVE";
-            default: return "Unknown";
-        }
-    }
+    std::string novelty_status_to_string(NoveltyClassifier::NoveltyStatus status);
 };
 
 // ============================================================================
@@ -19988,6 +19875,148 @@ private:
         return "unknown_function";
     }
 };
+
+// ============================================================================
+// SECTION 69B: NoveltyExpansionOrchestrator Out-of-Line Definitions
+// ============================================================================
+
+void NoveltyExpansionOrchestrator::run(const std::vector<Release>& releases, std::vector<Finding>& all_findings) {
+    Logger::instance().info("NoveltyExpansionOrchestrator::run: starting comprehensive audit across all releases");
+    
+    auto start_time = std::chrono::steady_clock::now();
+    
+    std::vector<std::string> versions = {"0.14.1", "0.17.0", "0.18.1", "0.20.0", "24.0.1", "31.0"};
+    
+    for (const auto& version : versions) {
+        Logger::instance().info("NoveltyExpansionOrchestrator: processing version " + version);
+        
+        const Release* target_release = nullptr;
+        for (const auto& release : releases) {
+            if (release.name == version) {
+                target_release = &release;
+                break;
+            }
+        }
+        
+        if (!target_release) {
+            Logger::instance().warning("NoveltyExpansionOrchestrator: version " + version + " not found in releases");
+            continue;
+        }
+        
+        for (auto& tu : target_release->translation_units) {
+            PackageRelayDoubleSpendAnalyzer pdsa;
+            auto f1 = pdsa.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f1.begin(), f1.end());
+            
+            UTXOCacheDivergenceDetector ucd;
+            auto f2 = ucd.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f2.begin(), f2.end());
+            
+            ReorgSpendReplayDetector rsr;
+            auto f3 = rsr.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f3.begin(), f3.end());
+            
+            ValueAccountingTracer vat;
+            auto f4 = vat.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f4.begin(), f4.end());
+            
+            WitnessAccountingInflationDetector waid;
+            auto f5 = waid.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f5.begin(), f5.end());
+            
+            WalletSecretLifetimeTracker wslt;
+            auto f6 = wslt.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f6.begin(), f6.end());
+            
+            IterationCountFingerprintEngine icfe;
+            auto f7 = icfe.analyze(const_cast<TranslationUnit*>(&tu));
+            all_findings.insert(all_findings.end(), f7.begin(), f7.end());
+        }
+    }
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator: collected " + std::to_string(all_findings.size()) + " raw findings");
+    
+    NoveltyClassifier nc;
+    for (auto& finding : all_findings) {
+        auto score = nc.classify_finding(finding);
+        finding.novelty_tag = novelty_status_to_string(score.status);
+        
+        if (score.status == NoveltyClassifier::NoveltyStatus::DesignBehavior || score.status == NoveltyClassifier::NoveltyStatus::Noise) {
+            finding.classification = Classification::NonExploitable;
+            continue;
+        }
+    }
+    
+    HistoricalIssueDatabase hdb;
+    for (auto& finding : all_findings) {
+        if (hdb.is_known_vulnerability(finding)) {
+            finding.novelty_tag = "HistoricallyKnown";
+        }
+    }
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator: collapsing duplicates");
+    DuplicateRootCauseCollapser drcc;
+    auto collapsed = drcc.collapse_findings(all_findings);
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator: scoring novelty confidence");
+    NoveltyConfidenceScorer ncs;
+    for (auto& f : collapsed) {
+        ncs.score_finding(f);
+    }
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator: analyzing cross-version evolution");
+    DifferentialVersionAnalyzer dva;
+    for (auto& f : collapsed) {
+        dva.classify_finding_evolution(f);
+    }
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator: generating oracle PoC");
+    WalletOraclePoCGenerator poc_gen;
+    auto analysis = poc_gen.analyze_wallet_for_oracle(releases);
+    
+    if (analysis.oracle_viable) {
+        std::string script = poc_gen.generate_poc_script(analysis);
+        std::ofstream poc_file("poc_padding_oracle.py");
+        poc_file << script;
+        poc_file.close();
+        Logger::instance().info("NoveltyExpansionOrchestrator: PoC script written to poc_padding_oracle.py");
+    }
+    
+    auto end_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+    int minutes = duration.count() / 60;
+    int seconds = duration.count() % 60;
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator: emitting enhanced report");
+    EnhancedReportEmitter ere;
+    auto summary = ere.compute_summary(collapsed);
+    ere.set_summary(summary);
+    ere.set_oracle_analysis(
+        analysis.oracle_viable,
+        analysis.kdf_method,
+        analysis.iteration_count,
+        analysis.gpu_guesses_per_sec,
+        analysis.recommended_attack,
+        analysis.estimated_queries
+    );
+    ere.set_analysis_time(minutes, seconds);
+    ere.emit_json_report(collapsed);
+    ere.log_completion_block();
+    
+    Logger::instance().info("NoveltyExpansionOrchestrator::run: complete");
+}
+
+std::string NoveltyExpansionOrchestrator::novelty_status_to_string(NoveltyClassifier::NoveltyStatus status) {
+    switch (status) {
+        case NoveltyClassifier::NoveltyStatus::GenuinelyNovel: return "Novel";
+        case NoveltyClassifier::NoveltyStatus::KnownVariant: return "KnownIssue";
+        case NoveltyClassifier::NoveltyStatus::DesignBehavior: return "DesignBehavior";
+        case NoveltyClassifier::NoveltyStatus::Noise: return "Noise";
+        case NoveltyClassifier::NoveltyStatus::HistoricalIssue: return "HistoricalCVE";
+        default: return "Unknown";
+    }
+}
+
 } // namespace btc_audit
 
 // End of bitcoin_core_full_audit_framework.cpp
