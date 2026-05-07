@@ -768,8 +768,6 @@ struct AnalysisConfig {
                        min_confidence(0.5) {}
 };
 
-class NoveltyExpansionOrchestrator;
-
 struct CheckpointState {
     AnalysisStage current_stage;
     std::vector<std::string> completed_files;
@@ -11519,6 +11517,151 @@ private:
 };
 
 // ============================================================================
+// SECTION 69: NoveltyExpansionOrchestrator
+// ============================================================================
+
+class NoveltyExpansionOrchestrator {
+public:
+    void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings) {
+        Logger::instance().info("NoveltyExpansionOrchestrator::run: starting comprehensive audit across all releases");
+        
+        auto start_time = std::chrono::steady_clock::now();
+        
+        std::vector<std::string> versions = {"0.14.1", "0.17.0", "0.18.1", "0.20.0", "24.0.1", "31.0"};
+        
+        for (const auto& version : versions) {
+            Logger::instance().info("NoveltyExpansionOrchestrator: processing version " + version);
+            
+            Release* target_release = nullptr;
+            for (auto& release : releases) {
+                if (release.name == version) {
+                    target_release = &release;
+                    break;
+                }
+            }
+            
+            if (!target_release) {
+                Logger::instance().warn("NoveltyExpansionOrchestrator: version " + version + " not found in releases");
+                continue;
+            }
+            
+            for (auto& tu : target_release->translation_units) {
+                PackageRelayDoubleSpendAnalyzer pdsa;
+                auto f1 = pdsa.analyze(&tu);
+                all_findings.insert(all_findings.end(), f1.begin(), f1.end());
+                
+                UTXOCacheDivergenceDetector ucd;
+                auto f2 = ucd.analyze(&tu);
+                all_findings.insert(all_findings.end(), f2.begin(), f2.end());
+                
+                ReorgSpendReplayDetector rsr;
+                auto f3 = rsr.analyze(&tu);
+                all_findings.insert(all_findings.end(), f3.begin(), f3.end());
+                
+                ValueAccountingTracer vat;
+                auto f4 = vat.analyze(&tu);
+                all_findings.insert(all_findings.end(), f4.begin(), f4.end());
+                
+                WitnessAccountingInflationDetector waid;
+                auto f5 = waid.analyze(&tu);
+                all_findings.insert(all_findings.end(), f5.begin(), f5.end());
+                
+                WalletSecretLifetimeTracker wslt;
+                auto f6 = wslt.analyze(&tu);
+                all_findings.insert(all_findings.end(), f6.begin(), f6.end());
+                
+                IterationCountFingerprintEngine icfe;
+                auto f7 = icfe.analyze(&tu);
+                all_findings.insert(all_findings.end(), f7.begin(), f7.end());
+            }
+        }
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator: collected " + std::to_string(all_findings.size()) + " raw findings");
+        
+        NoveltyClassifier nc;
+        for (auto& finding : all_findings) {
+            auto score = nc.classify_finding(finding);
+            finding.novelty_tag = novelty_status_to_string(score.status);
+            
+            if (score.status == NoveltyStatus::DesignBehavior || score.status == NoveltyStatus::Noise) {
+                finding.classification = Classification::NonExploitable;
+                continue;
+            }
+        }
+        
+        HistoricalIssueDatabase hdb;
+        for (auto& finding : all_findings) {
+            if (hdb.is_known_vulnerability(finding)) {
+                finding.novelty_tag = "HistoricallyKnown";
+            }
+        }
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator: collapsing duplicates");
+        DuplicateRootCauseCollapser drcc;
+        auto collapsed = drcc.collapse_findings(all_findings);
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator: scoring novelty confidence");
+        NoveltyConfidenceScorer ncs;
+        for (auto& f : collapsed) {
+            ncs.score_finding(f);
+        }
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator: analyzing cross-version evolution");
+        DifferentialVersionAnalyzer dva;
+        for (auto& f : collapsed) {
+            dva.classify_finding_evolution(f);
+        }
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator: generating oracle PoC");
+        WalletOraclePoCGenerator poc_gen;
+        auto analysis = poc_gen.analyze_wallet_for_oracle(releases);
+        
+        if (analysis.oracle_viable) {
+            std::string script = poc_gen.generate_poc_script(analysis);
+            std::ofstream poc_file("poc_padding_oracle.py");
+            poc_file << script;
+            poc_file.close();
+            Logger::instance().info("NoveltyExpansionOrchestrator: PoC script written to poc_padding_oracle.py");
+        }
+        
+        auto end_time = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+        int minutes = duration.count() / 60;
+        int seconds = duration.count() % 60;
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator: emitting enhanced report");
+        EnhancedReportEmitter ere;
+        auto summary = ere.compute_summary(collapsed);
+        ere.set_summary(summary);
+        ere.set_oracle_analysis(
+            analysis.oracle_viable,
+            analysis.kdf_method,
+            analysis.iteration_count,
+            analysis.gpu_guesses_per_sec,
+            analysis.recommended_attack,
+            analysis.estimated_queries
+        );
+        ere.set_analysis_time(minutes, seconds);
+        ere.emit_json_report(collapsed);
+        ere.log_completion_block();
+        
+        Logger::instance().info("NoveltyExpansionOrchestrator::run: complete");
+    }
+    
+private:
+    std::string novelty_status_to_string(NoveltyStatus status) {
+        switch (status) {
+            case NoveltyStatus::Novel: return "Novel";
+            case NoveltyStatus::KnownIssue: return "KnownIssue";
+            case NoveltyStatus::DesignBehavior: return "DesignBehavior";
+            case NoveltyStatus::Noise: return "Noise";
+            case NoveltyStatus::HistoricalCVE: return "HistoricalCVE";
+            default: return "Unknown";
+        }
+    }
+};
+
+// ============================================================================
 // SECTION 32: CLI ARGUMENT PARSER
 // ============================================================================
 
@@ -14871,8 +15014,8 @@ public:
         
         for (const auto& release : releases) {
             for (const auto& tu : release.translation_units) {
-                if (tu.path.find("wallet") != std::string::npos ||
-                    tu.path.find("crypter") != std::string::npos) {
+                if (tu.file_path.find("wallet") != std::string::npos ||
+                    tu.file_path.find("crypter") != std::string::npos) {
                     
                     size_t mkey_pos = tu.raw_content.find("mkey");
                     size_t ckey_pos = tu.raw_content.find("ckey");
@@ -15128,14 +15271,14 @@ public:
 private:
     Finding detect_package_acceptance_race(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "CONFIRMED";
+        f.classification = Classification::ConfirmedIssue;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "package_relay";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15161,11 +15304,11 @@ private:
             
             if (has_havecoin && !has_mutex) {
                 f.function_name = extract_function_name(content, package_pos);
-                f.line = count_newlines(content, package_pos);
+                f.location.line = count_newlines(content, package_pos);
                 f.confidence = 0.78;
                 f.evidence = "PACKAGE ACCEPTANCE RACE: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Package submission path checks UTXO existence (HaveCoins/GetCoin) " +
                            "before fully validating all package members atomically. " +
                            "Race window exists between ancestor limit check and full validation. " +
@@ -15190,14 +15333,14 @@ private:
     
     Finding detect_ancestor_accounting_overflow(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::High;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "package_relay";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15219,11 +15362,11 @@ private:
             
             if (has_increment && !has_overflow_check) {
                 f.function_name = extract_function_name(content, pos);
-                f.line = count_newlines(content, pos);
+                f.location.line = count_newlines(content, pos);
                 f.confidence = 0.65;
                 f.evidence = "ANCESTOR ACCOUNTING OVERFLOW: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Variable nCountWithAncestors or nSizeWithAncestors incremented without " +
                            "overflow check. At uint64_t max value, overflow wraps to zero. " +
                            "Attacker can craft package causing ancestor count/size to overflow, " +
@@ -15246,14 +15389,14 @@ private:
     
     Finding detect_package_replacement_bypass(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Medium;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "package_relay";
         f.reproducible = false;
         f.cross_build_verified = false;
@@ -15281,11 +15424,11 @@ private:
                 
                 if (checks_individual_rbf && !has_fee_aggregation) {
                     f.function_name = extract_function_name(content, rbf_pos);
-                    f.line = count_newlines(content, rbf_pos);
+                    f.location.line = count_newlines(content, rbf_pos);
                     f.confidence = 0.55;
                     f.evidence = "PACKAGE REPLACEMENT BYPASS: File=" + tu->file_path + 
                                ", function=" + f.function_name + 
-                               ", line~" + std::to_string(f.line) + 
+                               ", line~" + std::to_string(f.location.line) + 
                                ". Package RBF logic checks individual transaction RBF signals " +
                                "but does not aggregate fee across all package members. " +
                                "Attacker can replace non-RBF transactions by submitting package " +
@@ -15306,14 +15449,14 @@ private:
     
     Finding detect_descendant_limit_violation(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Medium;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "package_relay";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15342,11 +15485,11 @@ private:
             
             if (has_increment && (!has_check_before || increment_pos < check_pos)) {
                 f.function_name = extract_function_name(content, limit_pos);
-                f.line = count_newlines(content, limit_pos);
+                f.location.line = count_newlines(content, limit_pos);
                 f.confidence = 0.60;
                 f.evidence = "DESCENDANT LIMIT VIOLATION: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Descendant count incremented before limit check, or limit check uses " +
                            "pre-package count. Package acceptance could violate MEMPOOL_DESCENDANT_LIMIT. " +
                            "Attacker submits package where parent already has descendants near limit.";
@@ -15365,14 +15508,14 @@ private:
     
     Finding detect_package_topology_exploit(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::High;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "package_relay";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15386,7 +15529,7 @@ private:
         
         if (!has_topology_check && tu->file_path.find("txpackage") != std::string::npos) {
             f.function_name = "package_validation";
-            f.line = 1;
+            f.location.line = 1;
             f.confidence = 0.50;
             f.evidence = "PACKAGE TOPOLOGY EXPLOIT: File=" + tu->file_path + 
                        ". No topological sort or dependency validation detected in package submission path. " +
@@ -15470,14 +15613,14 @@ public:
 private:
     Finding detect_flush_ordering_hazard(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "cache_flush";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15501,7 +15644,7 @@ private:
         
         if ((in_connect_block || in_disconnect_block) && !has_cs_main) {
             f.function_name = extract_function_name(content, flush_pos);
-            f.line = count_newlines(content, flush_pos);
+            f.location.line = count_newlines(content, flush_pos);
             f.confidence = 0.82;
             f.evidence = "FLUSH ORDERING HAZARD: File=" + tu->file_path + 
                        ", function=" + f.function_name + 
@@ -15525,14 +15668,14 @@ private:
     
     Finding detect_cache_resurrection_bug(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "reorg";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15553,11 +15696,11 @@ private:
             
             if (in_disconnect && !has_spend_check && !has_existence_check) {
                 f.function_name = extract_function_name(content, addcoin_pos);
-                f.line = count_newlines(content, addcoin_pos);
+                f.location.line = count_newlines(content, addcoin_pos);
                 f.confidence = 0.75;
                 f.evidence = "CACHE RESURRECTION BUG: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". AddCoin() called in DisconnectBlock() without preceding SpendCoin() or existence check. " +
                            "If cache already has dirty (unspent) entry for this outpoint, undo application silently fails. " +
                            "Coin that should be resurrected remains spent, causing UTXO set divergence.";
@@ -15581,14 +15724,14 @@ private:
     
     Finding detect_batch_write_atomicity(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::High;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "cache_flush";
         f.reproducible = false;
         f.cross_build_verified = false;
@@ -15614,10 +15757,10 @@ private:
             
             if (has_iteration && !has_lock) {
                 f.function_name = "BatchWrite";
-                f.line = count_newlines(content, batch_pos);
+                f.location.line = count_newlines(content, batch_pos);
                 f.confidence = 0.68;
                 f.evidence = "BATCH WRITE ATOMICITY: File=" + tu->file_path + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". BatchWrite() iterates map and writes entries without holding lock for full iteration. " +
                            "If interrupted (exception, crash) during iteration, partial write leaves cache inconsistent. " +
                            "Some coins flushed to database, others remain in cache, but cache dirty flags may be cleared.";
@@ -15638,14 +15781,14 @@ private:
     
     Finding detect_spend_coin_race(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::High;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = false;
         f.cross_build_verified = false;
@@ -15665,11 +15808,11 @@ private:
             
             if (!has_existence_check) {
                 f.function_name = extract_function_name(content, spend_pos);
-                f.line = count_newlines(content, spend_pos);
+                f.location.line = count_newlines(content, spend_pos);
                 f.confidence = 0.70;
                 f.evidence = "SPEND COIN RACE: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". SpendCoin() called without preceding HaveCoins() or GetCoin() existence check " +
                            "within same lock scope. If coin doesn't exist, SpendCoin() may corrupt cache state " +
                            "by adding empty entry or failing to mark as spent.";
@@ -15693,14 +15836,14 @@ private:
     
     Finding detect_cache_db_sync_gap(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15721,11 +15864,11 @@ private:
                 
                 if (pindex_assigned) {
                     f.function_name = extract_function_name(content, pindex_pos);
-                    f.line = count_newlines(content, pindex_pos);
+                    f.location.line = count_newlines(content, pindex_pos);
                     f.confidence = 0.85;
                     f.evidence = "CACHE-DB SYNC GAP: File=" + tu->file_path + 
                                ", function=" + f.function_name + 
-                               ", line~" + std::to_string(f.line) + 
+                               ", line~" + std::to_string(f.location.line) + 
                                ". Block index (pindexNew) updated before Flush() completes. " +
                                "If node crashes between pindexNew assignment and Flush(), " +
                                "block index indicates block is connected but UTXO database not updated. " +
@@ -15811,14 +15954,14 @@ public:
 private:
     Finding detect_disconnect_block_undo_corruption(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "reorg";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15844,10 +15987,10 @@ private:
             
             if (in_disconnect && has_vinsize && !has_equality_check) {
                 f.function_name = "DisconnectBlock";
-                f.line = count_newlines(content, txundo_pos);
+                f.location.line = count_newlines(content, txundo_pos);
                 f.confidence = 0.77;
                 f.evidence = "DISCONNECT BLOCK UNDO CORRUPTION: File=" + tu->file_path + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". DisconnectBlock() applies undo data without verifying undo entry count matches " +
                            "transaction input count (vin.size()). If undo data is truncated or corrupted, " +
                            "wrong coins restored, causing UTXO set corruption.";
@@ -15868,14 +16011,14 @@ private:
     
     Finding detect_reorg_orphan_tx_resurrection(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::High;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "reorg";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -15896,11 +16039,11 @@ private:
             
             if (near_disconnect && !has_validation) {
                 f.function_name = extract_function_name(content, unchecked_pos);
-                f.line = count_newlines(content, unchecked_pos);
+                f.location.line = count_newlines(content, unchecked_pos);
                 f.confidence = 0.72;
                 f.evidence = "REORG ORPHAN TX RESURRECTION: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Transaction removed from mempool during reorg disconnect is re-added via " +
                            "addUnchecked() without re-validation against new chain tip. " +
                            "Transaction may be invalid in new chain (inputs missing, sequence locks violated).";
@@ -15922,14 +16065,14 @@ private:
     
     Finding detect_double_add_coin_during_reorg(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "reorg";
         f.reproducible = false;
         f.cross_build_verified = false;
@@ -15954,10 +16097,10 @@ private:
                 
                 if (has_disconnect && has_connect && !has_dedup) {
                     f.function_name = "reorg_handler";
-                    f.line = count_newlines(content, first_addcoin);
+                    f.location.line = count_newlines(content, first_addcoin);
                     f.confidence = 0.68;
                     f.evidence = "DOUBLE ADD COIN DURING REORG: File=" + tu->file_path + 
-                               ", line~" + std::to_string(f.line) + 
+                               ", line~" + std::to_string(f.location.line) + 
                                ". Two AddCoin() calls within 3000 chars in reorg code path " +
                                "(DisconnectBlock and ConnectBlock) without deduplication check. " +
                                "If same outpoint appears in both disconnected and connected blocks, " +
@@ -15980,14 +16123,14 @@ private:
     
     Finding detect_mempool_reorg_inconsistency(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Medium;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "reorg";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -16014,10 +16157,10 @@ private:
             
             if (block_before_reorg && in_activate_chain) {
                 f.function_name = "ActivateBestChain";
-                f.line = count_newlines(content, remove_block);
+                f.location.line = count_newlines(content, remove_block);
                 f.confidence = 0.63;
                 f.evidence = "MEMPOOL REORG INCONSISTENCY: File=" + tu->file_path + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". removeForBlock() called before removeForReorg() during multi-block reorg. " +
                            "Transactions that should be re-evaluated may be permanently removed. " +
                            "Correct order: removeForReorg() first (restore disconnected), then removeForBlock() (remove connected).";
@@ -16103,14 +16246,14 @@ public:
 private:
     Finding trace_nfees_accumulation(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -16132,7 +16275,7 @@ private:
             if (has_increment && !has_moneyrange) {
                 std::string func_name = extract_function_name(content, nfees_pos);
                 f.function_name = func_name;
-                f.line = count_newlines(content, nfees_pos);
+                f.location.line = count_newlines(content, nfees_pos);
                 f.confidence = 0.80;
                 
                 size_t increment_pos = context.find("nFees +");
@@ -16143,7 +16286,7 @@ private:
                 
                 f.evidence = "VALUE ACCOUNTING GAP (nFees): File=" + tu->file_path + 
                            ", function=" + func_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Fee accumulation '" + increment_line + "' not followed by MoneyRange check " +
                            "within 3000 chars. If nFees overflows MAX_MONEY, inflation possible. " +
                            "Attacker crafts transaction with negative fee (nValueOut > nValueIn), " +
@@ -16168,14 +16311,14 @@ private:
     
     Finding trace_nvaluein_vs_nvalueout(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -16206,11 +16349,11 @@ private:
             
             if (!has_comparison || !has_error_return) {
                 f.function_name = extract_function_name(content, valuein_pos);
-                f.line = count_newlines(content, valuein_pos);
+                f.location.line = count_newlines(content, valuein_pos);
                 f.confidence = 0.75;
                 f.evidence = "VALUE IN/OUT COMPARISON MISSING: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Function contains both nValueIn and nValueOut but lacks proper comparison " +
                            "(nValueOut <= nValueIn) with error return. Transaction could create value " +
                            "from nothing if outputs exceed inputs.";
@@ -16230,14 +16373,14 @@ private:
     
     Finding trace_witness_discount_accounting(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::High;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -16262,11 +16405,11 @@ private:
                 size_t other_weight = content.find("GetTransactionWeight", weight_pos + 20);
                 if (other_weight != std::string::npos) {
                     f.function_name = extract_function_name(content, weight_pos);
-                    f.line = count_newlines(content, weight_pos);
+                    f.location.line = count_newlines(content, weight_pos);
                     f.confidence = 0.70;
                     f.evidence = "WITNESS DISCOUNT INCONSISTENCY: File=" + tu->file_path + 
                                ", function=" + f.function_name + 
-                               ", line~" + std::to_string(f.line) + 
+                               ", line~" + std::to_string(f.location.line) + 
                                ". GetTransactionWeight used for relay with WITNESS_SCALE_FACTOR, " +
                                "but different weight calculation may be used for block validation. " +
                                "If relay uses discounted weight but validation uses raw weight, " +
@@ -16287,14 +16430,14 @@ private:
     
     Finding trace_package_fee_accounting(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "package_relay";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -16324,11 +16467,11 @@ private:
             
             if (has_accumulation && !has_overflow_check) {
                 f.function_name = extract_function_name(content, fee_pos);
-                f.line = count_newlines(content, fee_pos);
+                f.location.line = count_newlines(content, fee_pos);
                 f.confidence = 0.83;
                 f.evidence = "PACKAGE FEE OVERFLOW (31.0): File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". Package fee accumulation lacks overflow check. " +
                            "If total_fee += individual_fee causes CAmount overflow, " +
                            "value wraps to negative, enabling inflation.";
@@ -16353,14 +16496,14 @@ private:
     
     Finding trace_coinbase_subsidy_check(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Critical;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = true;
         f.cross_build_verified = false;
@@ -16384,11 +16527,11 @@ private:
             
             if (has_coinbase && has_comparison && has_conditional && conditional_can_bypass) {
                 f.function_name = extract_function_name(content, subsidy_pos);
-                f.line = count_newlines(content, subsidy_pos);
+                f.location.line = count_newlines(content, subsidy_pos);
                 f.confidence = 0.65;
                 f.evidence = "COINBASE SUBSIDY CHECK BYPASS: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
-                           ", line~" + std::to_string(f.line) + 
+                           ", line~" + std::to_string(f.location.line) + 
                            ". GetBlockSubsidy comparison against coinbase output wrapped in conditional " +
                            "that can be bypassed (e.g., height check). If condition is met, " +
                            "subsidy check skipped, allowing excessive coinbase.";
@@ -16408,14 +16551,14 @@ private:
     
     Finding trace_moneyrange_coverage(TranslationUnit* tu) {
         Finding f;
-        f.finding_id = generate_finding_id();
+        f.finding_id = std::hash<std::string>{}(generate_finding_id());
         f.release = tu->release_name;
         f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
-        f.classification = "INCONCLUSIVE";
+        f.classification = Classification::Inconclusive;
         f.severity = Severity::Medium;
         f.confidence = 0.0;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         f.reproducible = false;
         f.cross_build_verified = false;
@@ -16448,11 +16591,11 @@ private:
                         return_line.find("value") != std::string::npos) {
                         
                         f.function_name = extract_function_name(content, camount_pos);
-                        f.line = count_newlines(content, camount_pos);
+                        f.location.line = count_newlines(content, camount_pos);
                         f.confidence = 0.55;
                         f.evidence = "MONEYRANGE COVERAGE GAP: File=" + tu->file_path + 
                                    ", function=" + f.function_name + 
-                                   ", line~" + std::to_string(f.line) + 
+                                   ", line~" + std::to_string(f.location.line) + 
                                    ". CAmount value returned or modified without MoneyRange check. " +
                                    "If value exceeds MAX_MONEY, overflow or negative value possible.";
                         f.execution_path = {
@@ -16529,7 +16672,7 @@ public:
         f.confidence = 0.88;
         f.file = tu->file_path;
         f.release = tu->release_name;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         
         const std::string& content = tu->raw_content;
@@ -16574,7 +16717,7 @@ public:
         
         if (found_inconsistency) {
             f.function_name = "GetTransactionWeight";
-            f.line = count_newlines_before(content, content.find("GetTransactionWeight"));
+            f.location.line = count_newlines_before(content, content.find("GetTransactionWeight"));
             f.evidence = "WITNESS WEIGHT INCONSISTENCY DETECTED: " + inconsistency_desc + 
                         ". Exploitation path: Craft transaction with large witness data. " +
                         "If relay path counts witness bytes with discount but validation counts raw bytes, " +
@@ -16605,7 +16748,7 @@ public:
         f.confidence = 0.82;
         f.file = tu->file_path;
         f.release = tu->release_name;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         
         const std::string& content = tu->raw_content;
@@ -16657,7 +16800,7 @@ public:
         
         if (found_value_confusion) {
             f.function_name = "SignatureHash";
-            f.line = count_newlines_before(content, content.find("SignatureHash"));
+            f.location.line = count_newlines_before(content, content.find("SignatureHash"));
             f.evidence = "SEGWIT INPUT VALUE CONFUSION: " + confusion_evidence + 
                         " Exploit path: Attacker provides scriptCode containing fake nValue field. " +
                         "If signature computation uses this fake value instead of querying UTXO database, " +
@@ -16686,7 +16829,7 @@ public:
         f.confidence = 0.75;
         f.file = tu->file_path;
         f.release = tu->release_name;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         
         if (tu->release_name != "24.0.1" && tu->release_name != "31.0") {
@@ -16747,7 +16890,7 @@ public:
         
         if (relay_counts_annex != validation_counts_annex) {
             f.function_name = "GetTransactionWeight";
-            f.line = count_newlines_before(content, annex_references[0]);
+            f.location.line = count_newlines_before(content, annex_references[0]);
             f.evidence = "TAPROOT ANNEX WEIGHT DISCREPANCY: Relay policy counts annex in weight: " +
                         std::string(relay_counts_annex ? "YES" : "NO") +
                         ", Block validation counts annex in weight: " +
@@ -16779,7 +16922,7 @@ public:
         f.confidence = 0.91;
         f.file = tu->file_path;
         f.release = tu->release_name;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "p2p";
         
         const std::string& content = tu->raw_content;
@@ -16843,7 +16986,7 @@ public:
         
         if (found_double_discount) {
             f.function_name = "witness_weight_calculation";
-            f.line = count_newlines_before(content, first_pos);
+            f.location.line = count_newlines_before(content, first_pos);
             f.evidence = "WITNESS DISCOUNT DOUBLE APPLICATION DETECTED: Variable '" + double_discount_var +
                         "' divided by WITNESS_SCALE_FACTOR at position " + std::to_string(first_pos) +
                         " and again at position " + std::to_string(second_pos) +
@@ -16852,7 +16995,7 @@ public:
                         "Exploit: Attacker creates transaction with 400KB witness data. " +
                         "Correct weight = 400000 / 4 = 100000. Double-discounted weight = 400000 / 16 = 25000. " +
                         "Transaction appears 4x lighter than actual, allowing 4x oversized blocks. " +
-                        "File: " + tu->file_path + ", lines approximately " + std::to_string(f.line) + " and " +
+                        "File: " + tu->file_path + ", lines approximately " + std::to_string(f.location.line) + " and " +
                         std::to_string(count_newlines_before(content, second_pos));
             f.execution_path = {
                 "Miner constructs block with transactions totaling 4MB witness data",
@@ -16877,7 +17020,7 @@ public:
         f.confidence = 0.79;
         f.file = tu->file_path;
         f.release = tu->release_name;
-        f.secret_material_type = "N/A";
+        f.secret_material_type = SecretMaterialType::WalletPassword;
         f.reachability = "confirmed_path";
         
         const std::string& content = tu->raw_content;
@@ -16928,7 +17071,7 @@ public:
         
         if (mempool_requires_commitment != connectblock_requires_commitment) {
             f.function_name = "witness_commitment_validation";
-            f.line = count_newlines_before(content, content.find("witness"));
+            f.location.line = count_newlines_before(content, content.find("witness"));
             f.evidence = "COINBASE WITNESS COMMITMENT BYPASS: Mempool path requires commitment: " +
                         std::string(mempool_requires_commitment ? "YES" : "NO") +
                         ", ConnectBlock path requires commitment: " +
@@ -17226,8 +17369,8 @@ public:
         f.file = "wallet.dat";
         f.release = "all_versions";
         f.function_name = "wallet_encryption_analysis";
-        f.line = 0;
-        f.secret_material_type = "MasterKey";
+        f.location.line = 0;
+        f.secret_material_type = SecretMaterialType::MasterKey;
         f.reachability = "local_file_access";
         
         std::stringstream evidence;
@@ -18186,8 +18329,8 @@ public:
         f.file = "wallet.dat";
         f.release = "all_versions";
         f.function_name = "full_wallet_recovery";
-        f.line = 0;
-        f.secret_material_type = "MasterKey+PrivateKeys";
+        f.location.line = 0;
+        f.secret_material_type = SecretMaterialType::MasterKey;
         f.reachability = "local_file_access";
         
         std::stringstream evidence;
@@ -18377,12 +18520,12 @@ public:
                         regression.file = "scriptpubkeyman.cpp";
                         regression.release = "24.0.1";
                         regression.function_name = "descriptor_wallet_regression";
-                        regression.line = 0;
-                        regression.secret_material_type = "PrivateKey";
+                        regression.location.line = 0;
+                        regression.secret_material_type = SecretMaterialType::PrivateKey;
                         regression.reachability = "local";
                         regression.evidence = "DESCRIPTOR WALLET REGRESSION: Hardening pattern '" + pattern +
                                             "' present in 0.14.1 crypter.cpp but missing equivalent in 24.0.1 scriptpubkeyman.cpp. " +
-                                            "Legacy wallet code at " + old_finding.file + ":" + std::to_string(old_finding.line) +
+                                            "Legacy wallet code at " + old_finding.file + ":" + std::to_string(old_finding.location.line) +
                                             " implemented " + pattern + ", but descriptor wallet refactor omitted this protection.";
                         regression.execution_path = {
                             "0.14.1: CWallet uses " + pattern + " to protect key material in " + old_finding.file,
@@ -18412,8 +18555,8 @@ public:
         wal_regression.file = "wallet.dat-wal";
         wal_regression.release = "24.0.1";
         wal_regression.function_name = "sqlite_wal_persistence";
-        wal_regression.line = 0;
-        wal_regression.secret_material_type = "MasterKey+PrivateKeys";
+        wal_regression.location.line = 0;
+        wal_regression.secret_material_type = SecretMaterialType::MasterKey;
         wal_regression.reachability = "local_file_access";
         wal_regression.evidence = "SQLITE WAL REGRESSION: 24.0.1 introduces SQLite wallet storage. " +
                                   std::string("WAL file (-wal suffix) contains uncommitted transaction data including unencrypted key material. ") +
@@ -18436,8 +18579,8 @@ public:
         journal_regression.file = "wallet.dat-journal";
         journal_regression.release = "24.0.1";
         journal_regression.function_name = "sqlite_journal_rollback";
-        journal_regression.line = 0;
-        journal_regression.secret_material_type = "PrivateKeys";
+        journal_regression.location.line = 0;
+        journal_regression.secret_material_type = SecretMaterialType::PrivateKey;
         journal_regression.reachability = "local_file_access";
         journal_regression.evidence = "SQLITE JOURNAL REGRESSION: Journal file (-journal suffix) contains pre-image data for rollback. " +
                                      std::string("If transaction involving key decryption is rolled back, journal contains plaintext keys. ") +
@@ -18458,8 +18601,8 @@ public:
         vacuum_regression.file = "wallet.dat";
         vacuum_regression.release = "24.0.1";
         vacuum_regression.function_name = "sqlite_vacuum_wal_mode";
-        vacuum_regression.line = 0;
-        vacuum_regression.secret_material_type = "PrivateKeys";
+        vacuum_regression.location.line = 0;
+        vacuum_regression.secret_material_type = SecretMaterialType::PrivateKey;
         vacuum_regression.reachability = "local_file_access";
         vacuum_regression.evidence = "SQLITE VACUUM REGRESSION: VACUUM operation does not overwrite freed pages in WAL mode. " +
                                      std::string("Deleted key records remain in freed pages, recoverable via disk forensics. ") +
@@ -18513,12 +18656,12 @@ public:
                 regression.file = old_finding.file;
                 regression.release = version_n_plus_1;
                 regression.function_name = old_finding.function_name;
-                regression.line = old_finding.line;
-                regression.secret_material_type = "N/A";
+                regression.location.line = old_finding.location.line;
+                regression.secret_material_type = SecretMaterialType::WalletPassword;
                 regression.reachability = "p2p";
                 regression.evidence = "INFLATION CHECK REGRESSION: Function " + old_finding.function_name +
                                      " in version " + version_n + " had MoneyRange/nFees check at " +
-                                     old_finding.file + ":" + std::to_string(old_finding.line) +
+                                     old_finding.file + ":" + std::to_string(old_finding.location.line) +
                                      ". Version " + version_n_plus_1 + " REMOVED this check. " +
                                      "Original check prevented: " + old_finding.evidence;
                 regression.execution_path = {
@@ -19461,7 +19604,7 @@ private:
                             func_name,
                             "vMasterKey.clear() — NO memory_cleanse"
                         };
-                        finding.secret_material_type = "MasterKey";
+                        finding.secret_material_type = SecretMaterialType::MasterKey;
                         finding.reachability = "rpc";
                         finding.reproducible = true;
                         finding.cross_build_verified = false;
@@ -19539,7 +19682,7 @@ private:
                                 "catch block",
                                 key_var_name + " NOT cleansed"
                             };
-                            finding.secret_material_type = "PrivateKey";
+                            finding.secret_material_type = SecretMaterialType::PrivateKey;
                             finding.reachability = "indirect";
                             finding.reproducible = true;
                             finding.cross_build_verified = false;
@@ -19590,7 +19733,7 @@ private:
                         "Seed material in memory",
                         "NO memory_cleanse before scope exit"
                     };
-                    finding.secret_material_type = "HDSeed";
+                    finding.secret_material_type = SecretMaterialType::DecryptedSecret;
                     finding.reachability = "rpc";
                     finding.reproducible = true;
                     finding.cross_build_verified = false;
@@ -19648,7 +19791,7 @@ private:
                         "std::string allocation",
                         "Heap retention after use"
                     };
-                    finding.secret_material_type = "Passphrase";
+                    finding.secret_material_type = SecretMaterialType::Passphrase;
                     finding.reachability = "rpc";
                     finding.reproducible = true;
                     finding.cross_build_verified = false;
@@ -19678,7 +19821,7 @@ private:
                         "LogPrintf/LogPrint call",
                         "Passphrase written to debug.log"
                     };
-                    finding.secret_material_type = "Passphrase";
+                    finding.secret_material_type = SecretMaterialType::Passphrase;
                     finding.reachability = "rpc";
                     finding.reproducible = true;
                     finding.cross_build_verified = false;
@@ -19743,7 +19886,7 @@ private:
                             "privkey variable",
                             "function return — NO wipe"
                         };
-                        finding.secret_material_type = "PrivateKey";
+                        finding.secret_material_type = SecretMaterialType::PrivateKey;
                         finding.reachability = "rpc";
                         finding.reproducible = true;
                         finding.cross_build_verified = false;
@@ -19845,152 +19988,6 @@ private:
         return "unknown_function";
     }
 };
-
-// ============================================================================
-// SECTION 69: NoveltyExpansionOrchestrator
-// ============================================================================
-
-class NoveltyExpansionOrchestrator {
-public:
-    void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings) {
-        Logger::instance().info("NoveltyExpansionOrchestrator::run: starting comprehensive audit across all releases");
-        
-        auto start_time = std::chrono::steady_clock::now();
-        
-        std::vector<std::string> versions = {"0.14.1", "0.17.0", "0.18.1", "0.20.0", "24.0.1", "31.0"};
-        
-        for (const auto& version : versions) {
-            Logger::instance().info("NoveltyExpansionOrchestrator: processing version " + version);
-            
-            Release* target_release = nullptr;
-            for (auto& release : releases) {
-                if (release.name == version) {
-                    target_release = &release;
-                    break;
-                }
-            }
-            
-            if (!target_release) {
-                Logger::instance().warn("NoveltyExpansionOrchestrator: version " + version + " not found in releases");
-                continue;
-            }
-            
-            for (auto& tu : target_release->translation_units) {
-                PackageRelayDoubleSpendAnalyzer pdsa;
-                auto f1 = pdsa.analyze(&tu);
-                all_findings.insert(all_findings.end(), f1.begin(), f1.end());
-                
-                UTXOCacheDivergenceDetector ucd;
-                auto f2 = ucd.analyze(&tu);
-                all_findings.insert(all_findings.end(), f2.begin(), f2.end());
-                
-                ReorgSpendReplayDetector rsr;
-                auto f3 = rsr.analyze(&tu);
-                all_findings.insert(all_findings.end(), f3.begin(), f3.end());
-                
-                ValueAccountingTracer vat;
-                auto f4 = vat.analyze(&tu);
-                all_findings.insert(all_findings.end(), f4.begin(), f4.end());
-                
-                WitnessAccountingInflationDetector waid;
-                auto f5 = waid.analyze(&tu);
-                all_findings.insert(all_findings.end(), f5.begin(), f5.end());
-                
-                WalletSecretLifetimeTracker wslt;
-                auto f6 = wslt.analyze(&tu);
-                all_findings.insert(all_findings.end(), f6.begin(), f6.end());
-                
-                IterationCountFingerprintEngine icfe;
-                auto f7 = icfe.analyze(&tu);
-                all_findings.insert(all_findings.end(), f7.begin(), f7.end());
-            }
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: collected " + std::to_string(all_findings.size()) + " raw findings");
-        
-        NoveltyClassifier nc;
-        for (auto& finding : all_findings) {
-            auto score = nc.classify_finding(finding);
-            finding.novelty_tag = novelty_status_to_string(score.status);
-            
-            if (score.status == NoveltyStatus::DesignBehavior || score.status == NoveltyStatus::Noise) {
-                finding.classification = "SUPPRESSED";
-                continue;
-            }
-        }
-        
-        HistoricalIssueDatabase hdb;
-        for (auto& finding : all_findings) {
-            if (hdb.is_known_vulnerability(finding)) {
-                finding.novelty_tag = "HistoricallyKnown";
-            }
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: collapsing duplicates");
-        DuplicateRootCauseCollapser drcc;
-        auto collapsed = drcc.collapse_findings(all_findings);
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: scoring novelty confidence");
-        NoveltyConfidenceScorer ncs;
-        for (auto& f : collapsed) {
-            ncs.score_finding(f);
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: analyzing cross-version evolution");
-        DifferentialVersionAnalyzer dva;
-        for (auto& f : collapsed) {
-            dva.classify_finding_evolution(f);
-        }
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: generating oracle PoC");
-        WalletOraclePoCGenerator poc_gen;
-        auto analysis = poc_gen.analyze_wallet_for_oracle(releases);
-        
-        if (analysis.oracle_viable) {
-            std::string script = poc_gen.generate_poc_script(analysis);
-            std::ofstream poc_file("poc_padding_oracle.py");
-            poc_file << script;
-            poc_file.close();
-            Logger::instance().info("NoveltyExpansionOrchestrator: PoC script written to poc_padding_oracle.py");
-        }
-        
-        auto end_time = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-        int minutes = duration.count() / 60;
-        int seconds = duration.count() % 60;
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator: emitting enhanced report");
-        EnhancedReportEmitter ere;
-        auto summary = ere.compute_summary(collapsed);
-        ere.set_summary(summary);
-        ere.set_oracle_analysis(
-            analysis.oracle_viable,
-            analysis.kdf_method,
-            analysis.iteration_count,
-            analysis.gpu_guesses_per_sec,
-            analysis.recommended_attack,
-            analysis.estimated_queries
-        );
-        ere.set_analysis_time(minutes, seconds);
-        ere.emit_json_report(collapsed);
-        ere.log_completion_block();
-        
-        Logger::instance().info("NoveltyExpansionOrchestrator::run: complete");
-    }
-    
-private:
-    std::string novelty_status_to_string(NoveltyStatus status) {
-        switch (status) {
-            case NoveltyStatus::Novel: return "Novel";
-            case NoveltyStatus::KnownIssue: return "KnownIssue";
-            case NoveltyStatus::DesignBehavior: return "DesignBehavior";
-            case NoveltyStatus::Noise: return "Noise";
-            case NoveltyStatus::HistoricalCVE: return "HistoricalCVE";
-            default: return "Unknown";
-        }
-    }
-};
-
 } // namespace btc_audit
 
 // End of bitcoin_core_full_audit_framework.cpp
