@@ -644,6 +644,10 @@ struct Finding {
         return "unknown";
     }
 
+    std::string secret_material_type_string() const {
+        return secret_type_string();
+    }
+
     std::string to_json() const {
         std::ostringstream oss;
         oss << "{\n";
@@ -10884,6 +10888,320 @@ private:
     }
 };
 
+// ============================================================================
+// SECTION 50: HistoricalIssueDatabase
+// ============================================================================
+
+class HistoricalIssueDatabase {
+public:
+    struct VulnerabilityEntry {
+        std::string cve_id;
+        std::vector<std::string> affected_versions;
+        std::string vulnerability_class;
+        std::string root_cause_pattern;
+        std::string fixed_in_version;
+    };
+    
+    HistoricalIssueDatabase() {
+        initialize_database();
+    }
+    
+    bool is_known_vulnerability(const Finding& finding) {
+        Logger::instance().info("HistoricalIssueDatabase::is_known_vulnerability() - checking " + finding.function_name);
+        
+        std::string issue_type_str = issue_type_to_string(finding.issue_type);
+        std::string file_basename = extract_basename(finding.file);
+        
+        for (const auto& entry : vulnerability_db) {
+            if (entry.vulnerability_class == issue_type_str) {
+                if (finding.file.find(entry.root_cause_pattern) != std::string::npos ||
+                    file_basename == entry.root_cause_pattern) {
+                    Logger::instance().info("HistoricalIssueDatabase: MATCH FOUND - " + entry.cve_id);
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    bool matches_known_pattern(const std::string& evidence) {
+        for (const auto& entry : vulnerability_db) {
+            if (evidence.find(entry.root_cause_pattern) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    const VulnerabilityEntry* find_matching_vulnerability(const Finding& finding) {
+        Logger::instance().info("HistoricalIssueDatabase::find_matching_vulnerability() - searching for " + finding.function_name);
+        
+        std::string issue_type_str = issue_type_to_string(finding.issue_type);
+        std::string file_basename = extract_basename(finding.file);
+        
+        const VulnerabilityEntry* best_match = nullptr;
+        int best_score = 0;
+        
+        for (const auto& entry : vulnerability_db) {
+            int score = 0;
+            
+            if (entry.vulnerability_class == issue_type_str) {
+                score += 50;
+            }
+            
+            if (finding.file.find(entry.root_cause_pattern) != std::string::npos) {
+                score += 100;
+            }
+            
+            if (finding.evidence.find(entry.root_cause_pattern) != std::string::npos) {
+                score += 30;
+            }
+            
+            if (score > best_score) {
+                best_score = score;
+                best_match = &entry;
+            }
+        }
+        
+        if (best_match) {
+            Logger::instance().info("HistoricalIssueDatabase: Best match - " + best_match->cve_id + " (score: " + std::to_string(best_score) + ")");
+        }
+        
+        return best_match;
+    }
+    
+private:
+    std::vector<VulnerabilityEntry> vulnerability_db;
+    
+    void initialize_database() {
+        vulnerability_db = {
+            {"CVE-2018-17144", {"0.14.0", "0.14.1", "0.14.2", "0.15.0", "0.15.1", "0.16.0", "0.16.1", "0.16.2"},
+             "ConsensusInflation", "CheckTransaction", "0.16.3"},
+            
+            {"CVE-2010-5141", {"0.3.0", "0.3.10", "0.3.11", "0.3.12", "0.3.15", "0.3.18", "0.3.19"},
+             "ConsensusInflation", "OP_LSHIFT", "0.3.24"},
+            
+            {"CVE-2012-2459", {"0.4.0", "0.5.0", "0.6.0"},
+             "ConsensusInflation", "merkle", "0.6.1"},
+            
+            {"BIP66_STRICT_DER", {"0.9.0", "0.9.1", "0.9.2", "0.9.3"},
+             "ConsensusInflation", "IsValidSignatureEncoding", "0.10.0"},
+            
+            {"CVE-2013-4165", {"0.8.0", "0.8.1", "0.8.2", "0.8.3"},
+             "DoS", "bloom filter", "0.8.4"},
+            
+            {"KEYPOOL_PLAINTEXT_LEAK", {"0.6.0", "0.7.0", "0.8.0"},
+             "WalletLeakage", "keypool", "0.9.0"},
+            
+            {"SIGHASH_SINGLE_BUG", {"0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0"},
+             "ConsensusInflation", "SIGHASH_SINGLE", "known_design_issue"},
+            
+            {"CVE-2021-31876", {"0.17.0", "0.18.0", "0.19.0", "0.20.0"},
+             "DoS", "ProcessMessage", "0.21.0"},
+            
+            {"UPNP_RCE", {"0.3.0", "0.3.10", "0.3.19"},
+             "DoS", "miniupnpc", "0.3.20"},
+            
+            {"SCRIPT_VERIFY_NULLFAIL", {"0.13.0", "0.13.1"},
+             "ConsensusInflation", "CheckSignatureEncoding", "0.13.2"},
+            
+            {"WALLETPASSPHRASE_TIMEOUT_BYPASS", {"0.4.0", "0.5.0", "0.6.0", "0.7.0"},
+             "WalletLeakage", "walletpassphrase", "0.8.0"},
+            
+            {"WALLET_BACKUP_PLAINTEXT", {"0.5.0", "0.6.0", "0.7.0"},
+             "WalletLeakage", "BackupWallet", "0.8.0"},
+            
+            {"DUMPWALLET_NO_CLEANSE", {"0.13.0", "0.14.0", "0.15.0"},
+             "WalletLeakage", "DumpWallet", "0.16.0"},
+            
+            {"WALLET_UNLOCK_STACK_RESIDUE", {"0.6.0", "0.7.0", "0.8.0"},
+             "WalletLeakage", "Unlock", "0.9.0"}
+        };
+        
+        Logger::instance().info("HistoricalIssueDatabase initialized with " + std::to_string(vulnerability_db.size()) + " vulnerability fingerprints");
+    }
+    
+    std::string issue_type_to_string(IssueType type) {
+        switch (type) {
+            case IssueType::WalletLeakage: return "WalletLeakage";
+            case IssueType::AllocatorReuseLeakage: return "WalletLeakage";
+            case IssueType::InflationRisk: return "ConsensusInflation";
+            case IssueType::ConsensusInflation: return "ConsensusInflation";
+            case IssueType::DoS: return "DoS";
+            default: return "Unknown";
+        }
+    }
+    
+    std::string extract_basename(const std::string& path) {
+        size_t last_slash = path.rfind('/');
+        if (last_slash != std::string::npos) {
+            return path.substr(last_slash + 1);
+        }
+        return path;
+    }
+};
+
+// ============================================================================
+// SECTION 51: NoveltyClassifier
+// ============================================================================
+
+class NoveltyClassifier {
+public:
+    enum class NoveltyStatus {
+        GenuinelyNovel,
+        KnownVariant,
+        HistoricalIssue,
+        DesignBehavior,
+        Noise
+    };
+    
+    struct NoveltyScore {
+        NoveltyStatus status;
+        double structural_score;
+        double exploit_score;
+        double cross_version_score;
+        double composite;
+        std::string reasoning;
+    };
+    
+    NoveltyScore classify_finding(const Finding& finding) {
+        Logger::instance().info("NoveltyClassifier::classify_finding() - analyzing " + finding.function_name);
+        
+        NoveltyScore score;
+        
+        if (is_design_behavior(finding)) {
+            score.status = NoveltyStatus::DesignBehavior;
+            score.structural_score = 0.0;
+            score.exploit_score = 0.0;
+            score.cross_version_score = 0.0;
+            score.composite = 0.0;
+            score.reasoning = "Identified as intentional design behavior, not a vulnerability";
+            return score;
+        }
+        
+        score.structural_score = compute_structural_novelty(finding);
+        score.exploit_score = compute_exploit_novelty(finding);
+        score.cross_version_score = compute_cross_version_novelty(finding);
+        
+        const double STRUCTURAL_WEIGHT = 0.40;
+        const double EXPLOIT_WEIGHT = 0.40;
+        const double CROSS_VERSION_WEIGHT = 0.20;
+        
+        score.composite = (score.structural_score * STRUCTURAL_WEIGHT) +
+                         (score.exploit_score * EXPLOIT_WEIGHT) +
+                         (score.cross_version_score * CROSS_VERSION_WEIGHT);
+        
+        if (score.composite >= 0.90) {
+            score.status = NoveltyStatus::GenuinelyNovel;
+            score.reasoning = "High composite score (" + std::to_string(score.composite) + 
+                            ") - no historical match, complete exploit path, version-specific behavior";
+        } else if (score.composite >= 0.65) {
+            score.status = NoveltyStatus::KnownVariant;
+            score.reasoning = "Moderate composite score (" + std::to_string(score.composite) + 
+                            ") - shares characteristics with known issues but exhibits novel patterns";
+        } else if (score.composite >= 0.35) {
+            score.status = NoveltyStatus::HistoricalIssue;
+            score.reasoning = "Low composite score (" + std::to_string(score.composite) + 
+                            ") - matches known historical vulnerability patterns";
+        } else {
+            score.status = NoveltyStatus::Noise;
+            score.reasoning = "Very low composite score (" + std::to_string(score.composite) + 
+                            ") - likely false positive or insignificant finding";
+        }
+        
+        Logger::instance().info("NoveltyClassifier: " + score.reasoning);
+        return score;
+    }
+    
+    bool is_design_behavior(const Finding& finding) {
+        if (finding.issue_type == IssueType::WalletLeakage) {
+            if (finding.evidence.find("unencrypted wallet") != std::string::npos &&
+                finding.evidence.find("serialization_leak") != std::string::npos) {
+                return true;
+            }
+        }
+        
+        if (finding.evidence.find("heap_retained_private_key") != std::string::npos &&
+            finding.evidence.find("IsCrypted==false") != std::string::npos) {
+            return true;
+        }
+        
+        if (finding.evidence.find("intended behaviour") != std::string::npos ||
+            finding.evidence.find("design property") != std::string::npos) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+private:
+    HistoricalIssueDatabase hist_db;
+    
+    double compute_structural_novelty(const Finding& finding) {
+        const auto* match = hist_db.find_matching_vulnerability(finding);
+        
+        if (!match) {
+            return 1.0;
+        }
+        
+        std::string issue_type_str = (finding.issue_type == IssueType::WalletLeakage) ? "WalletLeakage" :
+                                     (finding.issue_type == IssueType::ConsensusInflation) ? "ConsensusInflation" : "Other";
+        
+        if (match->vulnerability_class == issue_type_str &&
+            finding.file.find(match->root_cause_pattern) != std::string::npos) {
+            return 0.0;
+        }
+        
+        if (hist_db.matches_known_pattern(finding.evidence)) {
+            return 0.3;
+        }
+        
+        if (match->vulnerability_class == issue_type_str) {
+            return 0.5;
+        }
+        
+        return 1.0;
+    }
+    
+    double compute_exploit_novelty(const Finding& finding) {
+        size_t path_length = finding.execution_path.size();
+        
+        if (path_length == 0) return 0.0;
+        if (path_length == 1) return 0.2;
+        if (path_length == 2) return 0.4;
+        if (path_length == 3) return 0.6;
+        if (path_length == 4) return 0.8;
+        return 1.0;
+    }
+    
+    double compute_cross_version_novelty(const Finding& finding) {
+        return 0.7;
+    }
+};
+
+// Forward declarations for NoveltyExpansionOrchestrator dependencies
+class PackageRelayDoubleSpendAnalyzer;
+class UTXOCacheDivergenceDetector;
+class ReorgSpendReplayDetector;
+class ValueAccountingTracer;
+class WitnessAccountingInflationDetector;
+class WalletSecretLifetimeTracker;
+class IterationCountFingerprintEngine;
+class DuplicateRootCauseCollapser;
+class NoveltyConfidenceScorer;
+class DifferentialVersionAnalyzer;
+class WalletOraclePoCGenerator;
+class EnhancedReportEmitter;
+
+class NoveltyExpansionOrchestrator {
+public:
+    void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings);
+    
+private:
+    std::string novelty_status_to_string(NoveltyClassifier::NoveltyStatus status);
+};
+
 class AuditOrchestrator {
 public:
     explicit AuditOrchestrator(const AnalysisConfig& config)
@@ -11524,29 +11842,6 @@ private:
 // ============================================================================
 // SECTION 69: NoveltyExpansionOrchestrator
 // ============================================================================
-
-class PackageRelayDoubleSpendAnalyzer;
-class UTXOCacheDivergenceDetector;
-class ReorgSpendReplayDetector;
-class ValueAccountingTracer;
-class WitnessAccountingInflationDetector;
-class WalletSecretLifetimeTracker;
-class IterationCountFingerprintEngine;
-class HistoricalIssueDatabase;
-class NoveltyClassifier;
-class DuplicateRootCauseCollapser;
-class NoveltyConfidenceScorer;
-class DifferentialVersionAnalyzer;
-class WalletOraclePoCGenerator;
-class EnhancedReportEmitter;
-
-class NoveltyExpansionOrchestrator {
-public:
-    void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings);
-    
-private:
-    std::string novelty_status_to_string(NoveltyClassifier::NoveltyStatus status);
-};
 
 // ============================================================================
 // SECTION 32: CLI ARGUMENT PARSER
@@ -14574,298 +14869,6 @@ public:
 };
 
 // ============================================================================
-// SECTION 50: HistoricalIssueDatabase
-// ============================================================================
-
-class HistoricalIssueDatabase {
-public:
-    struct VulnerabilityEntry {
-        std::string cve_id;
-        std::vector<std::string> affected_versions;
-        std::string vulnerability_class;
-        std::string root_cause_pattern;
-        std::string fixed_in_version;
-    };
-    
-    HistoricalIssueDatabase() {
-        initialize_database();
-    }
-    
-    bool is_known_vulnerability(const Finding& finding) {
-        Logger::instance().info("HistoricalIssueDatabase::is_known_vulnerability() - checking " + finding.function_name);
-        
-        std::string issue_type_str = issue_type_to_string(finding.issue_type);
-        std::string file_basename = extract_basename(finding.file);
-        
-        for (const auto& entry : vulnerability_db) {
-            if (entry.vulnerability_class == issue_type_str) {
-                if (finding.file.find(entry.root_cause_pattern) != std::string::npos ||
-                    file_basename == entry.root_cause_pattern) {
-                    Logger::instance().info("HistoricalIssueDatabase: MATCH FOUND - " + entry.cve_id);
-                    return true;
-                }
-            }
-        }
-        
-        return false;
-    }
-    
-    bool matches_known_pattern(const std::string& evidence) {
-        for (const auto& entry : vulnerability_db) {
-            if (evidence.find(entry.root_cause_pattern) != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    const VulnerabilityEntry* find_matching_vulnerability(const Finding& finding) {
-        Logger::instance().info("HistoricalIssueDatabase::find_matching_vulnerability() - searching for " + finding.function_name);
-        
-        std::string issue_type_str = issue_type_to_string(finding.issue_type);
-        std::string file_basename = extract_basename(finding.file);
-        
-        const VulnerabilityEntry* best_match = nullptr;
-        int best_score = 0;
-        
-        for (const auto& entry : vulnerability_db) {
-            int score = 0;
-            
-            if (entry.vulnerability_class == issue_type_str) {
-                score += 50;
-            }
-            
-            if (finding.file.find(entry.root_cause_pattern) != std::string::npos) {
-                score += 100;
-            }
-            
-            if (finding.evidence.find(entry.root_cause_pattern) != std::string::npos) {
-                score += 30;
-            }
-            
-            if (score > best_score) {
-                best_score = score;
-                best_match = &entry;
-            }
-        }
-        
-        if (best_match) {
-            Logger::instance().info("HistoricalIssueDatabase: Best match - " + best_match->cve_id + " (score: " + std::to_string(best_score) + ")");
-        }
-        
-        return best_match;
-    }
-    
-private:
-    std::vector<VulnerabilityEntry> vulnerability_db;
-    
-    void initialize_database() {
-        vulnerability_db = {
-            {"CVE-2018-17144", {"0.14.0", "0.14.1", "0.14.2", "0.15.0", "0.15.1", "0.16.0", "0.16.1", "0.16.2"},
-             "ConsensusInflation", "CheckTransaction", "0.16.3"},
-            
-            {"CVE-2010-5141", {"0.3.0", "0.3.10", "0.3.11", "0.3.12", "0.3.15", "0.3.18", "0.3.19"},
-             "ConsensusInflation", "OP_LSHIFT", "0.3.24"},
-            
-            {"CVE-2012-2459", {"0.4.0", "0.5.0", "0.6.0"},
-             "ConsensusInflation", "merkle", "0.6.1"},
-            
-            {"BIP66_STRICT_DER", {"0.9.0", "0.9.1", "0.9.2", "0.9.3"},
-             "ConsensusInflation", "IsValidSignatureEncoding", "0.10.0"},
-            
-            {"CVE-2013-4165", {"0.8.0", "0.8.1", "0.8.2", "0.8.3"},
-             "DoS", "bloom filter", "0.8.4"},
-            
-            {"KEYPOOL_PLAINTEXT_LEAK", {"0.6.0", "0.7.0", "0.8.0"},
-             "WalletLeakage", "keypool", "0.9.0"},
-            
-            {"SIGHASH_SINGLE_BUG", {"0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0"},
-             "ConsensusInflation", "SIGHASH_SINGLE", "known_design_issue"},
-            
-            {"CVE-2021-31876", {"0.17.0", "0.18.0", "0.19.0", "0.20.0"},
-             "DoS", "ProcessMessage", "0.21.0"},
-            
-            {"UPNP_RCE", {"0.3.0", "0.3.10", "0.3.19"},
-             "DoS", "miniupnpc", "0.3.20"},
-            
-            {"SCRIPT_VERIFY_NULLFAIL", {"0.13.0", "0.13.1"},
-             "ConsensusInflation", "CheckSignatureEncoding", "0.13.2"},
-            
-            {"WALLETPASSPHRASE_TIMEOUT_BYPASS", {"0.4.0", "0.5.0", "0.6.0", "0.7.0"},
-             "WalletLeakage", "walletpassphrase", "0.8.0"},
-            
-            {"WALLET_BACKUP_PLAINTEXT", {"0.5.0", "0.6.0", "0.7.0"},
-             "WalletLeakage", "BackupWallet", "0.8.0"},
-            
-            {"DUMPWALLET_NO_CLEANSE", {"0.13.0", "0.14.0", "0.15.0"},
-             "WalletLeakage", "DumpWallet", "0.16.0"},
-            
-            {"WALLET_UNLOCK_STACK_RESIDUE", {"0.6.0", "0.7.0", "0.8.0"},
-             "WalletLeakage", "Unlock", "0.9.0"}
-        };
-        
-        Logger::instance().info("HistoricalIssueDatabase initialized with " + std::to_string(vulnerability_db.size()) + " vulnerability fingerprints");
-    }
-    
-    std::string issue_type_to_string(IssueType type) {
-        switch (type) {
-            case IssueType::WalletLeakage: return "WalletLeakage";
-            case IssueType::AllocatorReuseLeakage: return "WalletLeakage";
-            case IssueType::InflationRisk: return "ConsensusInflation";
-            case IssueType::ConsensusInflation: return "ConsensusInflation";
-            case IssueType::DoS: return "DoS";
-            default: return "Unknown";
-        }
-    }
-    
-    std::string extract_basename(const std::string& path) {
-        size_t last_slash = path.rfind('/');
-        if (last_slash != std::string::npos) {
-            return path.substr(last_slash + 1);
-        }
-        return path;
-    }
-};
-
-// ============================================================================
-// SECTION 51: NoveltyClassifier
-// ============================================================================
-
-class NoveltyClassifier {
-public:
-    enum class NoveltyStatus {
-        GenuinelyNovel,
-        KnownVariant,
-        HistoricalIssue,
-        DesignBehavior,
-        Noise
-    };
-    
-    struct NoveltyScore {
-        NoveltyStatus status;
-        double structural_score;
-        double exploit_score;
-        double cross_version_score;
-        double composite;
-        std::string reasoning;
-    };
-    
-    NoveltyScore classify_finding(const Finding& finding) {
-        Logger::instance().info("NoveltyClassifier::classify_finding() - analyzing " + finding.function_name);
-        
-        NoveltyScore score;
-        
-        if (is_design_behavior(finding)) {
-            score.status = NoveltyStatus::DesignBehavior;
-            score.structural_score = 0.0;
-            score.exploit_score = 0.0;
-            score.cross_version_score = 0.0;
-            score.composite = 0.0;
-            score.reasoning = "Identified as intentional design behavior, not a vulnerability";
-            return score;
-        }
-        
-        score.structural_score = compute_structural_novelty(finding);
-        score.exploit_score = compute_exploit_novelty(finding);
-        score.cross_version_score = compute_cross_version_novelty(finding);
-        
-        const double STRUCTURAL_WEIGHT = 0.40;
-        const double EXPLOIT_WEIGHT = 0.40;
-        const double CROSS_VERSION_WEIGHT = 0.20;
-        
-        score.composite = (score.structural_score * STRUCTURAL_WEIGHT) +
-                         (score.exploit_score * EXPLOIT_WEIGHT) +
-                         (score.cross_version_score * CROSS_VERSION_WEIGHT);
-        
-        if (score.composite >= 0.90) {
-            score.status = NoveltyStatus::GenuinelyNovel;
-            score.reasoning = "High composite score (" + std::to_string(score.composite) + 
-                            ") - no historical match, complete exploit path, version-specific behavior";
-        } else if (score.composite >= 0.65) {
-            score.status = NoveltyStatus::KnownVariant;
-            score.reasoning = "Moderate composite score (" + std::to_string(score.composite) + 
-                            ") - shares characteristics with known issues but exhibits novel patterns";
-        } else if (score.composite >= 0.35) {
-            score.status = NoveltyStatus::HistoricalIssue;
-            score.reasoning = "Low composite score (" + std::to_string(score.composite) + 
-                            ") - matches known historical vulnerability patterns";
-        } else {
-            score.status = NoveltyStatus::Noise;
-            score.reasoning = "Very low composite score (" + std::to_string(score.composite) + 
-                            ") - likely false positive or insignificant finding";
-        }
-        
-        Logger::instance().info("NoveltyClassifier: " + score.reasoning);
-        return score;
-    }
-    
-    bool is_design_behavior(const Finding& finding) {
-        if (finding.issue_type == IssueType::WalletLeakage) {
-            if (finding.evidence.find("unencrypted wallet") != std::string::npos &&
-                finding.evidence.find("serialization_leak") != std::string::npos) {
-                return true;
-            }
-        }
-        
-        if (finding.evidence.find("heap_retained_private_key") != std::string::npos &&
-            finding.evidence.find("IsCrypted==false") != std::string::npos) {
-            return true;
-        }
-        
-        if (finding.evidence.find("intended behaviour") != std::string::npos ||
-            finding.evidence.find("design property") != std::string::npos) {
-            return true;
-        }
-        
-        return false;
-    }
-    
-private:
-    HistoricalIssueDatabase hist_db;
-    
-    double compute_structural_novelty(const Finding& finding) {
-        const auto* match = hist_db.find_matching_vulnerability(finding);
-        
-        if (!match) {
-            return 1.0;
-        }
-        
-        std::string issue_type_str = (finding.issue_type == IssueType::WalletLeakage) ? "WalletLeakage" :
-                                     (finding.issue_type == IssueType::ConsensusInflation) ? "ConsensusInflation" : "Other";
-        
-        if (match->vulnerability_class == issue_type_str &&
-            finding.file.find(match->root_cause_pattern) != std::string::npos) {
-            return 0.0;
-        }
-        
-        if (hist_db.matches_known_pattern(finding.evidence)) {
-            return 0.3;
-        }
-        
-        if (match->vulnerability_class == issue_type_str) {
-            return 0.5;
-        }
-        
-        return 1.0;
-    }
-    
-    double compute_exploit_novelty(const Finding& finding) {
-        size_t path_length = finding.execution_path.size();
-        
-        if (path_length == 0) return 0.0;
-        if (path_length == 1) return 0.2;
-        if (path_length == 2) return 0.4;
-        if (path_length == 3) return 0.6;
-        if (path_length == 4) return 0.8;
-        return 1.0;
-    }
-    
-    double compute_cross_version_novelty(const Finding& finding) {
-        return 0.7;
-    }
-};
-
-// ============================================================================
 // SECTION 52: WalletOraclePoCGenerator
 // ============================================================================
 
@@ -15535,7 +15538,7 @@ private:
             f.confidence = 0.82;
             f.evidence = "FLUSH ORDERING HAZARD: File=" + tu->file_path + 
                        ", function=" + f.function_name + 
-                       ", line~" + std::to_string(f.line) + 
+                       ", line~" + std::to_string(f.location.line) + 
                        ". Flush() called inside " + (in_connect_block ? "ConnectBlock" : "DisconnectBlock") +
                        " without holding cs_main for entire flush duration. " +
                        "If another thread modifies cache during flush, UTXO set becomes inconsistent. " +
@@ -17151,7 +17154,7 @@ public:
         std::vector<PassphraseSpace> passphrase_spaces = {
             {"8-char lowercase", 208827064576ULL},
             {"8-char alphanumeric", 218340105584896ULL},
-            {"10-char mixed+symbols", 59873693923837890625ULL}
+            {"10-char mixed+symbols", UINT64_MAX}
         };
         
         double iteration_factor = fields.nDeriveIterations / 25000.0;
@@ -17348,8 +17351,8 @@ public:
         bool parallel_blocks = true;
     };
     
-    AdaptiveOracleEngine(const OracleConfig& config = OracleConfig()) 
-        : config_(config), query_count_(0) {}
+    AdaptiveOracleEngine() : config_(OracleConfig{}), query_count_(0) {}
+    AdaptiveOracleEngine(const OracleConfig& config) : config_(config), query_count_(0) {}
     
     OracleState query_oracle(const std::vector<uint8_t>& ciphertext_32bytes,
                             const std::vector<uint8_t>& salt_8bytes) {
@@ -18751,7 +18754,7 @@ public:
                 for (const auto& inst : instances) {
                     CollapsedFinding::Instance ci;
                     ci.file = inst.file;
-                    ci.line = inst.line;
+                    ci.line = inst.location.line;
                     ci.function = inst.function_name;
                     ci.version = inst.release;
                     cf.collapsed_instances.push_back(ci);
@@ -18892,15 +18895,15 @@ private:
         HistoricalIssueDatabase hdb;
         
         auto match = hdb.find_matching_vulnerability(finding);
-        if (match.is_exact_match) {
+        if (match != nullptr) {
             return 0.0;
         }
         
-        if (hdb.matches_known_pattern(finding)) {
+        if (hdb.matches_known_pattern(finding.evidence)) {
             return 0.3;
         }
         
-        std::string issue_type_lower = finding.issue_type;
+        std::string issue_type_lower = finding.issue_type_string();
         std::transform(issue_type_lower.begin(), issue_type_lower.end(), 
                       issue_type_lower.begin(), ::tolower);
         
@@ -18916,11 +18919,7 @@ private:
     
     double compute_cross_version_delta(const Finding& finding) {
         std::vector<std::string> affected_versions;
-        if (!finding.affected_versions.empty()) {
-            affected_versions = finding.affected_versions;
-        } else {
-            affected_versions.push_back(finding.release);
-        }
+        affected_versions.push_back(finding.release);
         
         if (affected_versions.size() == 1) {
             return 0.8;
@@ -18940,7 +18939,7 @@ private:
             return 0.0;
         }
         
-        std::string issue_key = finding.issue_type + "_" + finding.function_name;
+        std::string issue_key = finding.issue_type_string() + "_" + finding.function_name;
         std::string issue_lower = issue_key;
         std::transform(issue_lower.begin(), issue_lower.end(), 
                       issue_lower.begin(), ::tolower);
@@ -18998,11 +18997,11 @@ private:
     }
     
     double validate_secret_type(const Finding& finding) {
-        std::string secret_type_lower = finding.secret_material_type;
+        std::string secret_type_lower = finding.secret_material_type_string();
         std::transform(secret_type_lower.begin(), secret_type_lower.end(),
                       secret_type_lower.begin(), ::tolower);
         
-        std::string issue_type_lower = finding.issue_type;
+        std::string issue_type_lower = finding.issue_type_string();
         std::transform(issue_type_lower.begin(), issue_type_lower.end(),
                       issue_type_lower.begin(), ::tolower);
         
