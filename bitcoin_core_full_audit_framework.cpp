@@ -126,7 +126,11 @@ enum class IssueType : uint8_t {
     ExportLeakage = 27,
     BackupLeakage = 28,
     ShutdownWipeMissing = 29,
-    KeypoolLeakage = 30
+    KeypoolLeakage = 30,
+    WalletLeakage = 31,
+    InflationRisk = 32,
+    ConsensusInflation = 33,
+    DoS = 34
 };
 
 enum class TokenType : uint8_t {
@@ -711,6 +715,11 @@ struct TranslationUnit {
     TranslationUnit() : parsed(false), analyzed(false), line_count(0) {}
 };
 
+struct Release {
+    std::string name;
+    std::vector<TranslationUnit> translation_units;
+};
+
 struct ReleaseInfo {
     std::string name;
     std::string base_path;
@@ -758,6 +767,8 @@ struct AnalysisConfig {
                        enable_checkpoint(true), enable_poc_testing(false),
                        min_confidence(0.5) {}
 };
+
+class NoveltyExpansionOrchestrator;
 
 struct CheckpointState {
     AnalysisStage current_stage;
@@ -11156,7 +11167,7 @@ public:
                 if (tu_ptr) {
                     TranslationUnit tu;
                     tu.file_path = tu_ptr->file_path;
-                    tu.release = tu_ptr->release;
+                    tu.release_name = tu_ptr->release_name;
                     tu.raw_content = tu_ptr->raw_content;
                     tu.parsed = tu_ptr->parsed;
                     tu.ast_root = tu_ptr->ast_root;
@@ -15090,11 +15101,11 @@ public:
 class PackageRelayDoubleSpendAnalyzer {
 public:
     std::vector<Finding> analyze(TranslationUnit* tu) {
-        Logger::instance().info("PackageRelayDoubleSpendAnalyzer::analyze() - " + tu->path);
+        Logger::instance().info("PackageRelayDoubleSpendAnalyzer::analyze() - " + tu->file_path);
         
         std::vector<Finding> findings;
         
-        if (tu->release != "31.0") {
+        if (tu->release_name != "31.0") {
             return findings;
         }
         
@@ -15118,8 +15129,8 @@ private:
     Finding detect_package_acceptance_race(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "CONFIRMED";
         f.severity = Severity::Critical;
@@ -15132,8 +15143,8 @@ private:
         
         const std::string& content = tu->raw_content;
         
-        if (tu->path.find("txpackage") == std::string::npos &&
-            tu->path.find("txmempool") == std::string::npos) {
+        if (tu->file_path.find("txpackage") == std::string::npos &&
+            tu->file_path.find("txmempool") == std::string::npos) {
             return f;
         }
         
@@ -15152,7 +15163,7 @@ private:
                 f.function_name = extract_function_name(content, package_pos);
                 f.line = count_newlines(content, package_pos);
                 f.confidence = 0.78;
-                f.evidence = "PACKAGE ACCEPTANCE RACE: File=" + tu->path + 
+                f.evidence = "PACKAGE ACCEPTANCE RACE: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Package submission path checks UTXO existence (HaveCoins/GetCoin) " +
@@ -15180,8 +15191,8 @@ private:
     Finding detect_ancestor_accounting_overflow(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::High;
@@ -15210,7 +15221,7 @@ private:
                 f.function_name = extract_function_name(content, pos);
                 f.line = count_newlines(content, pos);
                 f.confidence = 0.65;
-                f.evidence = "ANCESTOR ACCOUNTING OVERFLOW: File=" + tu->path + 
+                f.evidence = "ANCESTOR ACCOUNTING OVERFLOW: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Variable nCountWithAncestors or nSizeWithAncestors incremented without " +
@@ -15236,8 +15247,8 @@ private:
     Finding detect_package_replacement_bypass(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Medium;
@@ -15272,7 +15283,7 @@ private:
                     f.function_name = extract_function_name(content, rbf_pos);
                     f.line = count_newlines(content, rbf_pos);
                     f.confidence = 0.55;
-                    f.evidence = "PACKAGE REPLACEMENT BYPASS: File=" + tu->path + 
+                    f.evidence = "PACKAGE REPLACEMENT BYPASS: File=" + tu->file_path + 
                                ", function=" + f.function_name + 
                                ", line~" + std::to_string(f.line) + 
                                ". Package RBF logic checks individual transaction RBF signals " +
@@ -15296,8 +15307,8 @@ private:
     Finding detect_descendant_limit_violation(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Medium;
@@ -15333,7 +15344,7 @@ private:
                 f.function_name = extract_function_name(content, limit_pos);
                 f.line = count_newlines(content, limit_pos);
                 f.confidence = 0.60;
-                f.evidence = "DESCENDANT LIMIT VIOLATION: File=" + tu->path + 
+                f.evidence = "DESCENDANT LIMIT VIOLATION: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Descendant count incremented before limit check, or limit check uses " +
@@ -15355,8 +15366,8 @@ private:
     Finding detect_package_topology_exploit(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::High;
@@ -15373,11 +15384,11 @@ private:
                                   content.find("dependency") != std::string::npos ||
                                   content.find("parent") != std::string::npos);
         
-        if (!has_topology_check && tu->path.find("txpackage") != std::string::npos) {
+        if (!has_topology_check && tu->file_path.find("txpackage") != std::string::npos) {
             f.function_name = "package_validation";
             f.line = 1;
             f.confidence = 0.50;
-            f.evidence = "PACKAGE TOPOLOGY EXPLOIT: File=" + tu->path + 
+            f.evidence = "PACKAGE TOPOLOGY EXPLOIT: File=" + tu->file_path + 
                        ". No topological sort or dependency validation detected in package submission path. " +
                        "Without topology validation, attacker can inject cyclic dependencies or " +
                        "child-spending-parent-output within single package, causing validation inconsistencies.";
@@ -15431,12 +15442,12 @@ private:
 class UTXOCacheDivergenceDetector {
 public:
     std::vector<Finding> analyze(TranslationUnit* tu) {
-        Logger::instance().info("UTXOCacheDivergenceDetector::analyze() - " + tu->path);
+        Logger::instance().info("UTXOCacheDivergenceDetector::analyze() - " + tu->file_path);
         
         std::vector<Finding> findings;
         
-        if (tu->path.find("coins") == std::string::npos &&
-            tu->path.find("validation") == std::string::npos) {
+        if (tu->file_path.find("coins") == std::string::npos &&
+            tu->file_path.find("validation") == std::string::npos) {
             return findings;
         }
         
@@ -15460,8 +15471,8 @@ private:
     Finding detect_flush_ordering_hazard(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -15492,7 +15503,7 @@ private:
             f.function_name = extract_function_name(content, flush_pos);
             f.line = count_newlines(content, flush_pos);
             f.confidence = 0.82;
-            f.evidence = "FLUSH ORDERING HAZARD: File=" + tu->path + 
+            f.evidence = "FLUSH ORDERING HAZARD: File=" + tu->file_path + 
                        ", function=" + f.function_name + 
                        ", line~" + std::to_string(f.line) + 
                        ". Flush() called inside " + (in_connect_block ? "ConnectBlock" : "DisconnectBlock") +
@@ -15515,8 +15526,8 @@ private:
     Finding detect_cache_resurrection_bug(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -15544,7 +15555,7 @@ private:
                 f.function_name = extract_function_name(content, addcoin_pos);
                 f.line = count_newlines(content, addcoin_pos);
                 f.confidence = 0.75;
-                f.evidence = "CACHE RESURRECTION BUG: File=" + tu->path + 
+                f.evidence = "CACHE RESURRECTION BUG: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". AddCoin() called in DisconnectBlock() without preceding SpendCoin() or existence check. " +
@@ -15571,8 +15582,8 @@ private:
     Finding detect_batch_write_atomicity(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::High;
@@ -15585,7 +15596,7 @@ private:
         
         const std::string& content = tu->raw_content;
         
-        if (tu->path.find("coins.cpp") == std::string::npos) {
+        if (tu->file_path.find("coins.cpp") == std::string::npos) {
             return f;
         }
         
@@ -15605,7 +15616,7 @@ private:
                 f.function_name = "BatchWrite";
                 f.line = count_newlines(content, batch_pos);
                 f.confidence = 0.68;
-                f.evidence = "BATCH WRITE ATOMICITY: File=" + tu->path + 
+                f.evidence = "BATCH WRITE ATOMICITY: File=" + tu->file_path + 
                            ", line~" + std::to_string(f.line) + 
                            ". BatchWrite() iterates map and writes entries without holding lock for full iteration. " +
                            "If interrupted (exception, crash) during iteration, partial write leaves cache inconsistent. " +
@@ -15628,8 +15639,8 @@ private:
     Finding detect_spend_coin_race(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::High;
@@ -15656,7 +15667,7 @@ private:
                 f.function_name = extract_function_name(content, spend_pos);
                 f.line = count_newlines(content, spend_pos);
                 f.confidence = 0.70;
-                f.evidence = "SPEND COIN RACE: File=" + tu->path + 
+                f.evidence = "SPEND COIN RACE: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". SpendCoin() called without preceding HaveCoins() or GetCoin() existence check " +
@@ -15683,8 +15694,8 @@ private:
     Finding detect_cache_db_sync_gap(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -15712,7 +15723,7 @@ private:
                     f.function_name = extract_function_name(content, pindex_pos);
                     f.line = count_newlines(content, pindex_pos);
                     f.confidence = 0.85;
-                    f.evidence = "CACHE-DB SYNC GAP: File=" + tu->path + 
+                    f.evidence = "CACHE-DB SYNC GAP: File=" + tu->file_path + 
                                ", function=" + f.function_name + 
                                ", line~" + std::to_string(f.line) + 
                                ". Block index (pindexNew) updated before Flush() completes. " +
@@ -15774,11 +15785,11 @@ private:
 class ReorgSpendReplayDetector {
 public:
     std::vector<Finding> analyze(TranslationUnit* tu) {
-        Logger::instance().info("ReorgSpendReplayDetector::analyze() - " + tu->path);
+        Logger::instance().info("ReorgSpendReplayDetector::analyze() - " + tu->file_path);
         
         std::vector<Finding> findings;
         
-        if (tu->path.find("validation") == std::string::npos) {
+        if (tu->file_path.find("validation") == std::string::npos) {
             return findings;
         }
         
@@ -15801,8 +15812,8 @@ private:
     Finding detect_disconnect_block_undo_corruption(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -15835,7 +15846,7 @@ private:
                 f.function_name = "DisconnectBlock";
                 f.line = count_newlines(content, txundo_pos);
                 f.confidence = 0.77;
-                f.evidence = "DISCONNECT BLOCK UNDO CORRUPTION: File=" + tu->path + 
+                f.evidence = "DISCONNECT BLOCK UNDO CORRUPTION: File=" + tu->file_path + 
                            ", line~" + std::to_string(f.line) + 
                            ". DisconnectBlock() applies undo data without verifying undo entry count matches " +
                            "transaction input count (vin.size()). If undo data is truncated or corrupted, " +
@@ -15858,8 +15869,8 @@ private:
     Finding detect_reorg_orphan_tx_resurrection(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::High;
@@ -15887,7 +15898,7 @@ private:
                 f.function_name = extract_function_name(content, unchecked_pos);
                 f.line = count_newlines(content, unchecked_pos);
                 f.confidence = 0.72;
-                f.evidence = "REORG ORPHAN TX RESURRECTION: File=" + tu->path + 
+                f.evidence = "REORG ORPHAN TX RESURRECTION: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Transaction removed from mempool during reorg disconnect is re-added via " +
@@ -15912,8 +15923,8 @@ private:
     Finding detect_double_add_coin_during_reorg(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -15945,7 +15956,7 @@ private:
                     f.function_name = "reorg_handler";
                     f.line = count_newlines(content, first_addcoin);
                     f.confidence = 0.68;
-                    f.evidence = "DOUBLE ADD COIN DURING REORG: File=" + tu->path + 
+                    f.evidence = "DOUBLE ADD COIN DURING REORG: File=" + tu->file_path + 
                                ", line~" + std::to_string(f.line) + 
                                ". Two AddCoin() calls within 3000 chars in reorg code path " +
                                "(DisconnectBlock and ConnectBlock) without deduplication check. " +
@@ -15970,8 +15981,8 @@ private:
     Finding detect_mempool_reorg_inconsistency(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::DoS;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Medium;
@@ -16005,7 +16016,7 @@ private:
                 f.function_name = "ActivateBestChain";
                 f.line = count_newlines(content, remove_block);
                 f.confidence = 0.63;
-                f.evidence = "MEMPOOL REORG INCONSISTENCY: File=" + tu->path + 
+                f.evidence = "MEMPOOL REORG INCONSISTENCY: File=" + tu->file_path + 
                            ", line~" + std::to_string(f.line) + 
                            ". removeForBlock() called before removeForReorg() during multi-block reorg. " +
                            "Transactions that should be re-evaluated may be permanently removed. " +
@@ -16062,13 +16073,13 @@ private:
 class ValueAccountingTracer {
 public:
     std::vector<Finding> analyze(TranslationUnit* tu) {
-        Logger::instance().info("ValueAccountingTracer::analyze() - " + tu->path);
+        Logger::instance().info("ValueAccountingTracer::analyze() - " + tu->file_path);
         
         std::vector<Finding> findings;
         
-        if (tu->path.find("validation") == std::string::npos &&
-            tu->path.find("miner") == std::string::npos &&
-            tu->path.find("consensus") == std::string::npos) {
+        if (tu->file_path.find("validation") == std::string::npos &&
+            tu->file_path.find("miner") == std::string::npos &&
+            tu->file_path.find("consensus") == std::string::npos) {
             return findings;
         }
         
@@ -16093,8 +16104,8 @@ private:
     Finding trace_nfees_accumulation(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -16130,7 +16141,7 @@ private:
                 }
                 std::string increment_line = extract_line_at(context, increment_pos);
                 
-                f.evidence = "VALUE ACCOUNTING GAP (nFees): File=" + tu->path + 
+                f.evidence = "VALUE ACCOUNTING GAP (nFees): File=" + tu->file_path + 
                            ", function=" + func_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Fee accumulation '" + increment_line + "' not followed by MoneyRange check " +
@@ -16158,8 +16169,8 @@ private:
     Finding trace_nvaluein_vs_nvalueout(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -16197,7 +16208,7 @@ private:
                 f.function_name = extract_function_name(content, valuein_pos);
                 f.line = count_newlines(content, valuein_pos);
                 f.confidence = 0.75;
-                f.evidence = "VALUE IN/OUT COMPARISON MISSING: File=" + tu->path + 
+                f.evidence = "VALUE IN/OUT COMPARISON MISSING: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Function contains both nValueIn and nValueOut but lacks proper comparison " +
@@ -16220,8 +16231,8 @@ private:
     Finding trace_witness_discount_accounting(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::High;
@@ -16253,7 +16264,7 @@ private:
                     f.function_name = extract_function_name(content, weight_pos);
                     f.line = count_newlines(content, weight_pos);
                     f.confidence = 0.70;
-                    f.evidence = "WITNESS DISCOUNT INCONSISTENCY: File=" + tu->path + 
+                    f.evidence = "WITNESS DISCOUNT INCONSISTENCY: File=" + tu->file_path + 
                                ", function=" + f.function_name + 
                                ", line~" + std::to_string(f.line) + 
                                ". GetTransactionWeight used for relay with WITNESS_SCALE_FACTOR, " +
@@ -16277,8 +16288,8 @@ private:
     Finding trace_package_fee_accounting(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -16291,11 +16302,11 @@ private:
         
         const std::string& content = tu->raw_content;
         
-        if (tu->release != "31.0") {
+        if (tu->release_name != "31.0") {
             return f;
         }
         
-        if (tu->path.find("txpackage") == std::string::npos) {
+        if (tu->file_path.find("txpackage") == std::string::npos) {
             return f;
         }
         
@@ -16315,7 +16326,7 @@ private:
                 f.function_name = extract_function_name(content, fee_pos);
                 f.line = count_newlines(content, fee_pos);
                 f.confidence = 0.83;
-                f.evidence = "PACKAGE FEE OVERFLOW (31.0): File=" + tu->path + 
+                f.evidence = "PACKAGE FEE OVERFLOW (31.0): File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". Package fee accumulation lacks overflow check. " +
@@ -16343,8 +16354,8 @@ private:
     Finding trace_coinbase_subsidy_check(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::ConsensusInflation;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Critical;
@@ -16375,7 +16386,7 @@ private:
                 f.function_name = extract_function_name(content, subsidy_pos);
                 f.line = count_newlines(content, subsidy_pos);
                 f.confidence = 0.65;
-                f.evidence = "COINBASE SUBSIDY CHECK BYPASS: File=" + tu->path + 
+                f.evidence = "COINBASE SUBSIDY CHECK BYPASS: File=" + tu->file_path + 
                            ", function=" + f.function_name + 
                            ", line~" + std::to_string(f.line) + 
                            ". GetBlockSubsidy comparison against coinbase output wrapped in conditional " +
@@ -16398,8 +16409,8 @@ private:
     Finding trace_moneyrange_coverage(TranslationUnit* tu) {
         Finding f;
         f.finding_id = generate_finding_id();
-        f.release = tu->release;
-        f.file = tu->path;
+        f.release = tu->release_name;
+        f.file = tu->file_path;
         f.issue_type = IssueType::InflationRisk;
         f.classification = "INCONCLUSIVE";
         f.severity = Severity::Medium;
@@ -16412,8 +16423,8 @@ private:
         
         const std::string& content = tu->raw_content;
         
-        if (tu->path.find("tx_verify") == std::string::npos &&
-            tu->path.find("validation") == std::string::npos) {
+        if (tu->file_path.find("tx_verify") == std::string::npos &&
+            tu->file_path.find("validation") == std::string::npos) {
             return f;
         }
         
@@ -16439,7 +16450,7 @@ private:
                         f.function_name = extract_function_name(content, camount_pos);
                         f.line = count_newlines(content, camount_pos);
                         f.confidence = 0.55;
-                        f.evidence = "MONEYRANGE COVERAGE GAP: File=" + tu->path + 
+                        f.evidence = "MONEYRANGE COVERAGE GAP: File=" + tu->file_path + 
                                    ", function=" + f.function_name + 
                                    ", line~" + std::to_string(f.line) + 
                                    ". CAmount value returned or modified without MoneyRange check. " +
@@ -16516,8 +16527,8 @@ public:
         f.issue_type = IssueType::InflationRisk;
         f.severity = Severity::Critical;
         f.confidence = 0.88;
-        f.file = tu->path;
-        f.release = tu->release;
+        f.file = tu->file_path;
+        f.release = tu->release_name;
         f.secret_material_type = "N/A";
         f.reachability = "p2p";
         
@@ -16569,7 +16580,7 @@ public:
                         "If relay path counts witness bytes with discount but validation counts raw bytes, " +
                         "transaction appears lighter during relay than it actually is during block validation. " +
                         "Allows oversized blocks to propagate. Conversely, if validation discounts but relay does not, " +
-                        "legitimate transactions rejected by relay but accepted by miners. Evidence: file=" + tu->path +
+                        "legitimate transactions rejected by relay but accepted by miners. Evidence: file=" + tu->file_path +
                         ", inconsistency=" + inconsistency_desc;
             f.execution_path = {
                 "Attacker creates transaction with 400KB witness data",
@@ -16592,8 +16603,8 @@ public:
         f.issue_type = IssueType::ConsensusInflation;
         f.severity = Severity::Critical;
         f.confidence = 0.82;
-        f.file = tu->path;
-        f.release = tu->release;
+        f.file = tu->file_path;
+        f.release = tu->release_name;
         f.secret_material_type = "N/A";
         f.reachability = "p2p";
         
@@ -16652,7 +16663,7 @@ public:
                         "If signature computation uses this fake value instead of querying UTXO database, " +
                         "signature verification succeeds with incorrect input amount. " +
                         "This allows double-spend by signing transaction claiming input is worth less than actual value. " +
-                        "File: " + tu->path;
+                        "File: " + tu->file_path;
             f.execution_path = {
                 "Attacker creates transaction with input referencing 1 BTC UTXO",
                 "scriptCode crafted to include embedded nValue field = 0.01 BTC",
@@ -16673,14 +16684,14 @@ public:
         f.issue_type = IssueType::DoS;
         f.severity = Severity::High;
         f.confidence = 0.75;
-        f.file = tu->path;
-        f.release = tu->release;
+        f.file = tu->file_path;
+        f.release = tu->release_name;
         f.secret_material_type = "N/A";
         f.reachability = "p2p";
         
-        if (tu->release != "24.0.1" && tu->release != "31.0") {
+        if (tu->release_name != "24.0.1" && tu->release_name != "31.0") {
             f.confidence = 0.0;
-            f.evidence = "Taproot annex detection skipped - release " + tu->release + " not in scope (24.0.1, 31.0 only)";
+            f.evidence = "Taproot annex detection skipped - release " + tu->release_name + " not in scope (24.0.1, 31.0 only)";
             return f;
         }
         
@@ -16744,7 +16755,7 @@ public:
                         ". If relay excludes annex from weight but validation includes it: " +
                         "oversized annex allows transaction relay but miners cannot include in blocks (DoS). " +
                         "If relay includes but validation excludes: transaction rejected by relay but valid for mining. " +
-                        "File: " + tu->path;
+                        "File: " + tu->file_path;
             f.execution_path = {
                 "Attacker creates Taproot transaction with 100KB annex data",
                 relay_counts_annex ? "Relay policy includes annex in weight calculation: weight exceeds limit, transaction rejected" :
@@ -16766,8 +16777,8 @@ public:
         f.issue_type = IssueType::InflationRisk;
         f.severity = Severity::Critical;
         f.confidence = 0.91;
-        f.file = tu->path;
-        f.release = tu->release;
+        f.file = tu->file_path;
+        f.release = tu->release_name;
         f.secret_material_type = "N/A";
         f.reachability = "p2p";
         
@@ -16841,7 +16852,7 @@ public:
                         "Exploit: Attacker creates transaction with 400KB witness data. " +
                         "Correct weight = 400000 / 4 = 100000. Double-discounted weight = 400000 / 16 = 25000. " +
                         "Transaction appears 4x lighter than actual, allowing 4x oversized blocks. " +
-                        "File: " + tu->path + ", lines approximately " + std::to_string(f.line) + " and " +
+                        "File: " + tu->file_path + ", lines approximately " + std::to_string(f.line) + " and " +
                         std::to_string(count_newlines_before(content, second_pos));
             f.execution_path = {
                 "Miner constructs block with transactions totaling 4MB witness data",
@@ -16864,8 +16875,8 @@ public:
         f.issue_type = IssueType::ConsensusInflation;
         f.severity = Severity::High;
         f.confidence = 0.79;
-        f.file = tu->path;
-        f.release = tu->release;
+        f.file = tu->file_path;
+        f.release = tu->release_name;
         f.secret_material_type = "N/A";
         f.reachability = "confirmed_path";
         
@@ -16926,7 +16937,7 @@ public:
                         "If mempool rejects blocks without commitment but ConnectBlock accepts them: " +
                         "mining nodes can create blocks without witness commitments that relay nodes reject, causing chain splits. " +
                         "If opposite: relay accepts invalid blocks that fail ConnectBlock validation. " +
-                        "File: " + tu->path;
+                        "File: " + tu->file_path;
             f.execution_path = {
                 "Miner constructs SegWit block with witness transactions",
                 mempool_requires_commitment ? "Mempool rejects block for missing witness commitment in coinbase" :
@@ -19388,7 +19399,7 @@ int EnhancedReportEmitter::version_counter_ = 0;
 class WalletSecretLifetimeTracker {
 public:
     std::vector<Finding> analyze(TranslationUnit* tu) {
-        Logger::instance().info("WalletSecretLifetimeTracker::analyze: scanning " + tu->file_path + " in release " + tu->release);
+        Logger::instance().info("WalletSecretLifetimeTracker::analyze: scanning " + tu->file_path + " in release " + tu->release_name);
         
         std::vector<Finding> findings;
         
@@ -19435,7 +19446,7 @@ private:
                     if (window.find("memory_cleanse") == std::string::npos) {
                         Finding finding;
                         finding.finding_id = generate_finding_id("stale_key_" + func_name);
-                        finding.release = tu->release;
+                        finding.release = tu->release_name;
                         finding.file = tu->file_path;
                         finding.function_name = func_name;
                         finding.issue_type = "stale_decrypted_key";
@@ -19457,7 +19468,7 @@ private:
                         finding.manual_review_required = true;
                         finding.novelty_tag = "Novel";
                         
-                        if (tu->release == "24.0.1" && func_name == "EraseLockedUTXO") {
+                        if (tu->release_name == "24.0.1" && func_name == "EraseLockedUTXO") {
                             finding.evidence += " -- Novel regression not present in 0.14.1";
                             finding.novelty_tag = "NovelHighPriority";
                         }
@@ -19513,7 +19524,7 @@ private:
                             
                             Finding finding;
                             finding.finding_id = generate_finding_id("exception_retention");
-                            finding.release = tu->release;
+                            finding.release = tu->release_name;
                             finding.file = tu->file_path;
                             finding.function_name = extract_function_name(content, try_start);
                             finding.issue_type = "exception_path_retention";
@@ -19564,7 +19575,7 @@ private:
                 if (window.find("memory_cleanse") == std::string::npos) {
                     Finding finding;
                     finding.finding_id = generate_finding_id("hd_seed_" + pattern);
-                    finding.release = tu->release;
+                    finding.release = tu->release_name;
                     finding.file = tu->file_path;
                     finding.function_name = pattern;
                     finding.issue_type = "hd_seed_lifetime";
@@ -19586,7 +19597,7 @@ private:
                     finding.manual_review_required = true;
                     finding.novelty_tag = "NovelHighPriority";
                     
-                    if (tu->release == "24.0.1" && tu->file_path.find("scriptpubkeyman") != std::string::npos) {
+                    if (tu->release_name == "24.0.1" && tu->file_path.find("scriptpubkeyman") != std::string::npos) {
                         finding.evidence += " -- Master_key variable scope spans 2083 lines (225-2308) with NO cleanse";
                         finding.severity = Severity::Critical;
                     }
@@ -19622,7 +19633,7 @@ private:
                     
                     Finding finding;
                     finding.finding_id = generate_finding_id("plaintext_pass_" + handler);
-                    finding.release = tu->release;
+                    finding.release = tu->release_name;
                     finding.file = tu->file_path;
                     finding.function_name = handler;
                     finding.issue_type = "plaintext_password_retention";
@@ -19652,7 +19663,7 @@ private:
                     
                     Finding finding;
                     finding.finding_id = generate_finding_id("logging_pass_" + handler);
-                    finding.release = tu->release;
+                    finding.release = tu->release_name;
                     finding.file = tu->file_path;
                     finding.function_name = handler;
                     finding.issue_type = "logging_exposure";
@@ -19687,7 +19698,7 @@ private:
     std::vector<Finding> analyze_scriptpubkeyman_key_exposure(TranslationUnit* tu) {
         std::vector<Finding> findings;
         
-        if (tu->release != "24.0.1") {
+        if (tu->release_name != "24.0.1") {
             return findings;
         }
         
@@ -19717,7 +19728,7 @@ private:
                     if (!has_cleanse) {
                         Finding finding;
                         finding.finding_id = generate_finding_id("scriptpubkeyman_" + func);
-                        finding.release = tu->release;
+                        finding.release = tu->release_name;
                         finding.file = tu->file_path;
                         finding.function_name = func;
                         finding.issue_type = "heap_retained_private_key";
@@ -19753,7 +19764,7 @@ private:
     std::vector<Finding> analyze_descriptor_wallet_key_leak(TranslationUnit* tu) {
         std::vector<Finding> findings;
         
-        if (tu->release != "24.0.1") {
+        if (tu->release_name != "24.0.1") {
             return findings;
         }
         
@@ -19778,7 +19789,7 @@ private:
                     
                     Finding finding;
                     finding.finding_id = generate_finding_id("descriptor_key_" + pattern);
-                    finding.release = tu->release;
+                    finding.release = tu->release_name;
                     finding.file = tu->file_path;
                     finding.function_name = pattern;
                     finding.issue_type = "incomplete_zeroization";
