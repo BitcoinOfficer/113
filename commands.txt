@@ -1,0 +1,280 @@
+# Bitcoin Core Full Audit Framework - Build and Execution Commands
+# This file contains the complete ordered list of shell commands required to compile and run the audit framework
+
+# ============================================================================
+# STEP 1: ENVIRONMENT SETUP
+# ============================================================================
+
+# Navigate to the repository root (if not already there)
+cd /path/to/bitcoin_core_audit_framework
+
+# ============================================================================
+# STEP 2: INSTALL BUILD DEPENDENCIES
+# ============================================================================
+
+# For Ubuntu/Debian systems:
+sudo apt update
+sudo apt install -y build-essential cmake clang llvm libclang-dev git
+
+# For macOS systems (requires Homebrew):
+brew install cmake llvm git
+
+# For Amazon Linux 2023 / Red Hat / Fedora:
+sudo dnf install -y gcc-c++ cmake clang llvm-devel git
+
+# ============================================================================
+# STEP 3: CLONE OR VERIFY BITCOIN CORE RELEASES
+# ============================================================================
+
+# Create a directory for Bitcoin Core releases if it doesn't exist
+mkdir -p bitcoin_releases
+cd bitcoin_releases
+
+# Clone Bitcoin Core repository (if not already cloned)
+git clone https://github.com/bitcoin/bitcoin.git
+cd bitcoin
+
+# Checkout and prepare each target release version
+git checkout v0.14.1
+git archive --format=tar --prefix=bitcoin-0.14.1/ HEAD | tar -xf - -C ../
+cd ..
+
+cd bitcoin
+git checkout v0.17.0
+git archive --format=tar --prefix=bitcoin-0.17.0/ HEAD | tar -xf - -C ../
+cd ..
+
+cd bitcoin
+git checkout v0.18.1
+git archive --format=tar --prefix=bitcoin-0.18.1/ HEAD | tar -xf - -C ../
+cd ..
+
+cd bitcoin
+git checkout v0.20.0
+git archive --format=tar --prefix=bitcoin-0.20.0/ HEAD | tar -xf - -C ../
+cd ..
+
+cd bitcoin
+git checkout v24.0.1
+git archive --format=tar --prefix=bitcoin-24.0.1/ HEAD | tar -xf - -C ../
+cd ..
+
+cd bitcoin
+git checkout v31.0
+git archive --format=tar --prefix=bitcoin-31.0/ HEAD | tar -xf - -C ../
+cd ..
+
+# Return to repository root
+cd ..
+
+# ============================================================================
+# STEP 4: CONFIGURE THE BUILD
+# ============================================================================
+
+# Create a build directory
+mkdir -p build
+cd build
+
+# Run CMake to configure the build (if CMakeLists.txt is available)
+# Note: If no CMakeLists.txt exists, you'll need to use direct compilation (see STEP 5 alternative)
+cmake .. -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release
+
+# ============================================================================
+# STEP 5: COMPILE THE AUDIT FRAMEWORK
+# ============================================================================
+
+# If using CMake:
+cmake --build . -j$(nproc)
+
+# Alternative: Direct compilation without CMake
+# (Use this if CMakeLists.txt is not available or CMake configuration fails)
+cd ..
+clang++ -std=c++17 -O2 -o bitcoin_audit_framework bitcoin_core_full_audit_framework.cpp \
+    -I/usr/include \
+    -lpthread \
+    -lstdc++fs \
+    -Wall -Wextra
+
+# For macOS (if using direct compilation):
+clang++ -std=c++17 -O2 -o bitcoin_audit_framework bitcoin_core_full_audit_framework.cpp \
+    -I/usr/local/include \
+    -lpthread \
+    -Wall -Wextra
+
+# ============================================================================
+# STEP 6: VERIFY COMPILATION SUCCESS
+# ============================================================================
+
+# Check that the binary was created successfully
+ls -lh bitcoin_audit_framework
+
+# Display binary information
+file bitcoin_audit_framework
+
+# ============================================================================
+# STEP 7: PREPARE EXECUTION ENVIRONMENT
+# ============================================================================
+
+# Create output directories
+mkdir -p audit_results
+mkdir -p instrumentation_output
+mkdir -p fuzz_harnesses
+
+# Set execution permissions
+chmod +x bitcoin_audit_framework
+
+# ============================================================================
+# STEP 8: RUN THE AUDIT FRAMEWORK
+# ============================================================================
+
+# Run the complete audit across all Bitcoin Core releases
+# Note: Adjust paths based on your actual Bitcoin Core release directory structure
+./bitcoin_audit_framework \
+    --release bitcoin_releases/bitcoin-0.14.1 \
+    --release bitcoin_releases/bitcoin-0.17.0 \
+    --release bitcoin_releases/bitcoin-0.18.1 \
+    --release bitcoin_releases/bitcoin-0.20.0 \
+    --release bitcoin_releases/bitcoin-24.0.1 \
+    --release bitcoin_releases/bitcoin-31.0 \
+    --output audit_results/full_audit_report.json \
+    --verbose \
+    --enable-checkpoint \
+    --enable-fuzz-generation \
+    --enable-diff-analysis
+
+# Alternative: Run with specific configuration file (if implemented)
+./bitcoin_audit_framework --config config.json
+
+# Alternative: Run single version for testing
+./bitcoin_audit_framework \
+    --release bitcoin_releases/bitcoin-24.0.1 \
+    --output audit_results/test_report.json \
+    --verbose
+
+# ============================================================================
+# STEP 9: VERIFY OUTPUT FILES
+# ============================================================================
+
+# Check that the JSON report was generated
+ls -lh audit_results/
+cat audit_results/full_audit_report.json | head -n 50
+
+# Verify the JSON report files from EnhancedReportEmitter
+ls -lh report_v*.json
+
+# Check if PoC script was generated
+ls -lh poc_padding_oracle.py
+
+# View the PoC script
+cat poc_padding_oracle.py
+
+# ============================================================================
+# STEP 10: EXECUTE GENERATED POC (OPTIONAL)
+# ============================================================================
+
+# Install Python dependencies for PoC execution (if needed)
+pip3 install pycryptodome requests
+
+# Run the padding oracle PoC script (only if oracle_viable=true)
+python3 poc_padding_oracle.py --help
+python3 poc_padding_oracle.py --wallet-file /path/to/wallet.dat --iterations 25000
+
+# ============================================================================
+# STEP 11: REVIEW INSTRUMENTATION AND FUZZ HARNESSES
+# ============================================================================
+
+# List generated LLVM instrumentation files
+ls -lh instrumentation_output/
+
+# List generated fuzz harnesses
+ls -lh fuzz_harnesses/
+
+# Compile a sample fuzz harness (example)
+clang++ -std=c++17 -fsanitize=fuzzer,address \
+    fuzz_harnesses/fuzz_wallet_decrypt.cpp \
+    -o fuzz_wallet_decrypt \
+    -I./bitcoin_releases/bitcoin-24.0.1/src
+
+# ============================================================================
+# STEP 12: POST-PROCESSING AND ANALYSIS
+# ============================================================================
+
+# Extract high-priority findings from JSON report
+cat report_v0.json | grep -A 10 "NovelHighPriority"
+
+# Count total findings by classification
+cat report_v0.json | grep "classification" | sort | uniq -c
+
+# Count findings by severity
+cat report_v0.json | grep "severity" | sort | uniq -c
+
+# Extract all findings with "confirmed" classification
+cat report_v0.json | grep -B 5 -A 15 '"classification": "CONFIRMED"'
+
+# ============================================================================
+# STEP 13: CLEANUP (OPTIONAL)
+# ============================================================================
+
+# Remove build artifacts
+rm -rf build/
+
+# Remove temporary checkpoint files
+rm -f checkpoint.dat
+
+# Archive results for long-term storage
+tar -czf audit_results_$(date +%Y%m%d_%H%M%S).tar.gz \
+    audit_results/ \
+    report_v*.json \
+    poc_padding_oracle.py \
+    instrumentation_output/ \
+    fuzz_harnesses/
+
+# ============================================================================
+# TROUBLESHOOTING NOTES
+# ============================================================================
+
+# If compilation fails due to missing headers:
+# - Verify clang++ and llvm are properly installed
+# - Check that C++17 standard library is available
+# - Ensure all include paths are correct
+
+# If execution fails with "cannot open release directory":
+# - Verify that Bitcoin Core release paths are correct
+# - Ensure the release directories contain src/ subdirectories
+# - Check file permissions
+
+# If no findings are generated:
+# - Verify that source files are being parsed (check verbose output)
+# - Ensure translation units are being created successfully
+# - Check that detector modules are being instantiated
+
+# If JSON report is empty or malformed:
+# - Check for write permissions in the current directory
+# - Review stderr output for JSON serialization errors
+# - Verify that findings vector is populated before reporting
+
+# ============================================================================
+# PLATFORM-SPECIFIC NOTES
+# ============================================================================
+
+# Amazon Linux 2023:
+# - Use dnf instead of apt/yum
+# - May require: sudo dnf install -y libstdc++-static
+
+# macOS:
+# - Use brew to install dependencies
+# - May need to export LLVM path: export PATH="/usr/local/opt/llvm/bin:$PATH"
+# - Filesystem library may require explicit linking: -lc++fs or built-in on macOS 10.15+
+
+# Ubuntu 20.04+:
+# - C++17 filesystem should work out of the box with GCC 9+
+# - May need: sudo apt install -y libc++-dev libc++abi-dev
+
+# Docker container execution:
+# - Ensure sufficient memory (minimum 4GB recommended for full analysis)
+# - Mount Bitcoin Core releases as volumes
+# - Example: docker run -v /path/to/releases:/releases audit_framework --release /releases/bitcoin-24.0.1
+
+# ============================================================================
+# END OF COMMANDS
+# ============================================================================
