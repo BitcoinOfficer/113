@@ -6340,6 +6340,24 @@ public:
         }
 
         deduplicate(filtered);
+        
+        // Wire BackCheckEngine — structural back-checks on survivors
+        BackCheckEngine bce;
+        PatternLibrary bce_pl;
+        bce_pl.load_patterns();
+        for (auto& f : filtered) {
+            if (f.classification == Classification::FalsePositive) continue;
+            std::string raw;
+            auto tu_it = all_tus.find(f.file);
+            if (tu_it != all_tus.end() && tu_it->second)
+                raw = tu_it->second->raw_content;
+            bool suppress = bce.back_check(f, raw, bce_pl);
+            if (suppress) {
+                f.classification = Classification::FalsePositive;
+                f.evidence += " [Suppressed by BackCheckEngine]";
+            }
+        }
+        
         return filtered;
     }
 
@@ -18934,37 +18952,76 @@ public:
                 cf.affected_versions = {instances[0].release};
                 collapsed.push_back(cf);
             } else {
-                Finding highest_severity = instances[0];
-                for (const auto& inst : instances) {
-                    if (static_cast<int>(inst.severity) > static_cast<int>(highest_severity.severity)) {
-                        highest_severity = inst;
+                // Check for StructuralVariant before collapsing
+                std::vector<Finding> independent_variants;
+                std::vector<Finding> to_collapse;
+                
+                for (size_t i = 0; i < instances.size(); i++) {
+                    bool is_variant = false;
+                    for (size_t j = 0; j < to_collapse.size(); j++) {
+                        float sim = evidence_similarity(instances[i].evidence, to_collapse[j].evidence);
+                        if (sim < 0.85f) {
+                            Finding variant = instances[i];
+                            variant.novelty_tag = "StructuralVariant";
+                            variant.evidence += " [Mechanism C: structurally similar to finding " + 
+                                std::to_string(to_collapse[j].finding_id) + 
+                                " (root cause hash match) but evidence similarity=" + 
+                                std::to_string(sim).substr(0, 4) + 
+                                " — retaining as independent finding]";
+                            independent_variants.push_back(variant);
+                            is_variant = true;
+                            break;
+                        }
+                    }
+                    if (!is_variant) {
+                        to_collapse.push_back(instances[i]);
                     }
                 }
                 
-                CollapsedFinding cf;
-                static_cast<Finding&>(cf) = highest_severity;
-                cf.instance_count = instances.size();
-                
-                double confidence_sum = 0.0;
-                std::set<std::string> unique_versions;
-                
-                for (const auto& inst : instances) {
-                    CollapsedFinding::Instance ci;
-                    ci.file = inst.file;
-                    ci.line = inst.location.line;
-                    ci.function = inst.function_name;
-                    ci.version = inst.release;
-                    cf.collapsed_instances.push_back(ci);
-                    
-                    confidence_sum += inst.confidence;
-                    unique_versions.insert(inst.release);
+                // Add independent variants as separate findings
+                for (const auto& variant : independent_variants) {
+                    CollapsedFinding cf;
+                    static_cast<Finding&>(cf) = variant;
+                    cf.instance_count = 1;
+                    cf.novelty_score = variant.confidence;
+                    cf.affected_versions = {variant.release};
+                    collapsed.push_back(cf);
                 }
                 
-                cf.novelty_score = confidence_sum / instances.size();
-                cf.affected_versions.assign(unique_versions.begin(), unique_versions.end());
-                std::sort(cf.affected_versions.begin(), cf.affected_versions.end());
-                
-                collapsed.push_back(cf);
+                // Collapse the normal instances
+                if (!to_collapse.empty()) {
+                    Finding highest_severity = to_collapse[0];
+                    for (const auto& inst : to_collapse) {
+                        if (static_cast<int>(inst.severity) > static_cast<int>(highest_severity.severity)) {
+                            highest_severity = inst;
+                        }
+                    }
+                    
+                    CollapsedFinding cf;
+                    static_cast<Finding&>(cf) = highest_severity;
+                    cf.instance_count = to_collapse.size();
+                    
+                    double confidence_sum = 0.0;
+                    std::set<std::string> unique_versions;
+                    
+                    for (const auto& inst : to_collapse) {
+                        CollapsedFinding::Instance ci;
+                        ci.file = inst.file;
+                        ci.line = inst.location.line;
+                        ci.function = inst.function_name;
+                        ci.version = inst.release;
+                        cf.collapsed_instances.push_back(ci);
+                        
+                        confidence_sum += inst.confidence;
+                        unique_versions.insert(inst.release);
+                    }
+                    
+                    cf.novelty_score = confidence_sum / to_collapse.size();
+                    cf.affected_versions.assign(unique_versions.begin(), unique_versions.end());
+                    std::sort(cf.affected_versions.begin(), cf.affected_versions.end());
+                    
+                    collapsed.push_back(cf);
+                }
             }
         }
         
@@ -19014,6 +19071,17 @@ public:
     }
     
 private:
+    float evidence_similarity(const std::string& a, const std::string& b) const {
+        if (a.empty() || b.empty()) return 0.0f;
+        size_t match = 0;
+        size_t compare_len = std::min(a.size(), b.size());
+        size_t max_len = std::max(a.size(), b.size());
+        for (size_t i = 0; i < compare_len; i++) {
+            if (a[i] == b[i]) match++;
+        }
+        return static_cast<float>(match) / static_cast<float>(max_len);
+    }
+
     std::string issue_type_string(IssueType type) {
         switch (type) {
             case IssueType::WalletLeakage: return "WalletLeakage";
@@ -20989,6 +21057,60 @@ public:
             }
         }
 
+        // BC-2: broadened wipe alias search
+        bool is_wipe_finding = f.issue_type == IssueType::CompilerOptimizationRemoval ||
+                               f.issue_type == IssueType::DeadStoreElimination ||
+                               f.issue_type == IssueType::IncompleteZeroization ||
+                               f.issue_type == IssueType::StaleDecryptedKey;
+        if (is_wipe_finding) {
+            std::vector<std::string> broad_wipe = {
+                "clear", "zero", "erase", "reset", "destroy", "clean", "wipe",
+                "sanitize", "scrub", "burn", "secure_clear", "explicit_bzero", "explicit_memset"};
+            std::string var_hint;
+            size_t tick = f.evidence.find('\'');
+            if (tick != std::string::npos) {
+                size_t tick2 = f.evidence.find('\'', tick + 1);
+                if (tick2 != std::string::npos)
+                    var_hint = f.evidence.substr(tick + 1, tick2 - tick - 1);
+            }
+            for (const auto& wt : broad_wipe) {
+                size_t wpos = raw_content.find(wt + "(");
+                while (wpos != std::string::npos) {
+                    std::string wcall = raw_content.substr(wpos, std::min((size_t)100, raw_content.size() - wpos));
+                    if (!var_hint.empty() && wcall.find(var_hint) != std::string::npos) {
+                        f.evidence += " [BC-2: Potential wipe alias '" + wt + "' found taking '" + var_hint + "' — manual confirmation required]";
+                        f.manual_review_required = true;
+                        break;
+                    }
+                    wpos = raw_content.find(wt + "(", wpos + 1);
+                }
+            }
+        }
+
+        // BC-3: function rename tracking
+        if (f.evidence.find("API ABSENT IN VERSION") != std::string::npos ||
+            f.evidence.find("not found as definition") != std::string::npos) {
+            auto all_matches = pl.match(raw_content, "wipe");
+            for (const auto& m : all_matches) {
+                size_t ctx_start = (m.match_position > 200) ? m.match_position - 200 : 0;
+                std::string fn_ctx = raw_content.substr(ctx_start, std::min((size_t)400, raw_content.size() - ctx_start));
+                size_t paren = fn_ctx.find('(');
+                if (paren == std::string::npos || paren < 2) continue;
+                size_t name_end = paren;
+                while (name_end > 0 && fn_ctx[name_end - 1] == ' ') name_end--;
+                size_t name_start = name_end;
+                while (name_start > 0 && (std::isalnum((unsigned char)fn_ctx[name_start - 1]) || fn_ctx[name_start - 1] == '_'))
+                    name_start--;
+                std::string candidate = fn_ctx.substr(name_start, name_end - name_start);
+                if (!candidate.empty() && candidate != f.function_name && candidate.size() > 3) {
+                    std::string old_fn = f.function_name;
+                    f.function_name = candidate;
+                    f.evidence += " [BC-3: Function renamed in " + f.release + " from '" + old_fn + "' to '" + candidate + "']";
+                    break;
+                }
+            }
+        }
+
         // BC-4: Constant/enum variable
         if (f.issue_type == IssueType::HeapRetainedPrivateKey || f.issue_type == IssueType::StaleDecryptedKey) {
             size_t decl_pos = raw_content.find(f.function_name);
@@ -21108,6 +21230,22 @@ void NoveltyExpansionOrchestrator::run(const std::vector<Release>& releases, std
     }
     
     Logger::instance().info("NoveltyExpansionOrchestrator: collected " + std::to_string(all_findings.size()) + " raw findings");
+    
+    // Wire PristineVerificationEngine — mandatory second-pass verification
+    Logger::instance().info(
+        "NoveltyExpansionOrchestrator: running PristineVerificationEngine over " + 
+        std::to_string(all_findings.size()) + " findings");
+    PristineVerificationEngine pve;
+    std::string combined_content;
+    for (const auto& release : releases) {
+        for (const auto& tu : release.translation_units) {
+            combined_content += tu.raw_content + "\n";
+        }
+    }
+    PatternLibrary pve_pl;
+    pve_pl.load_patterns();
+    pve.run_verification_pass(all_findings, combined_content, pve_pl);
+    Logger::instance().info("NoveltyExpansionOrchestrator: PristineVerificationEngine complete");
     
     // IMP14: Assign review_tier before novelty classification
     for (auto& finding : all_findings) {
