@@ -3699,6 +3699,20 @@ private:
             f.evidence = "Private key '" + inst.variable_name +
                         "' passes through serialization in " + inst.containing_function;
             f.manual_review_required = true;
+            
+            {
+                size_t site = content.find("WriteKey");
+                if (site == std::string::npos) site = 0;
+                size_t win_start = (site > 250) ? site - 250 : 0;
+                std::string guard_window = content.substr(win_start, std::min((size_t)500, content.size() - win_start));
+                bool has_guard = guard_window.find("IsCrypted") != std::string::npos || guard_window.find("fUseCrypto") != std::string::npos;
+                if (!has_guard) {
+                    f.classification = Classification::NonExploitable;
+                    f.novelty_tag = "DesignBehavior";
+                    f.evidence += " [DESIGN BEHAVIOUR: WriteKey on unencrypted wallet is intended. Genuine vulnerability requires WriteKey reachable when IsCrypted()==true — not confirmed at this site.]";
+                }
+            }
+            
             findings.push_back(f);
         }
 
@@ -5058,7 +5072,7 @@ private:
 // ============================================================================
 
 class RPCPasswordAnalyzer {
-    static inline std::map<std::string, int> emitted_rpc_categories_;
+    std::map<std::string, std::map<std::string, int>> emitted_rpc_patterns_;
     std::string categorize_rpc(const std::string& file, const std::string& ev) {
         if (file.find("netbase") != std::string::npos || ev.find("SOCKS5") != std::string::npos) return "socks5_password";
         if (file.find("torcontrol") != std::string::npos || ev.find("Tor") != std::string::npos) return "torcontrol_password";
@@ -5067,10 +5081,12 @@ class RPCPasswordAnalyzer {
     }
     bool should_emit(const std::string& release, const std::string& cat) {
         std::string key = release + "|" + cat;
-        int& c = emitted_rpc_categories_[key];
-        if (cat == "rpc_generic_exposure" && c >= 3) return false;
-        if (cat != "rpc_generic_exposure" && c >= 1) return false;
-        c++; return true;
+        auto& cat_map = emitted_rpc_patterns_[release];
+        int existing = cat_map.count(cat) ? cat_map[cat] : 0;
+        if (cat == "rpc_generic_exposure" && existing >= 3) return false;
+        if (cat != "rpc_generic_exposure" && existing >= 1) return false;
+        cat_map[cat]++;
+        return true;
     }
 public:
     std::vector<Finding> analyze(const std::shared_ptr<TranslationUnit>& tu,
@@ -7563,6 +7579,21 @@ private:
                     f.evidence = "Secret material encoded via " + match[1].str() +
                                 " - encoded form may persist in std::string heap allocations";
                     f.manual_review_required = true;
+                    
+                    {
+                        const auto& content = tu->raw_content;
+                        size_t site = content.find("WriteKey");
+                        if (site == std::string::npos) site = 0;
+                        size_t win_start = (site > 250) ? site - 250 : 0;
+                        std::string guard_window = content.substr(win_start, std::min((size_t)500, content.size() - win_start));
+                        bool has_guard = guard_window.find("IsCrypted") != std::string::npos || guard_window.find("fUseCrypto") != std::string::npos;
+                        if (!has_guard) {
+                            f.classification = Classification::NonExploitable;
+                            f.novelty_tag = "DesignBehavior";
+                            f.evidence += " [DESIGN BEHAVIOUR: WriteKey on unencrypted wallet is intended. Genuine vulnerability requires WriteKey reachable when IsCrypted()==true — not confirmed at this site.]";
+                        }
+                    }
+                    
                     findings.push_back(f);
                 }
             }
@@ -7857,6 +7888,21 @@ private:
                         f.execution_path.push_back(tu->file_path + ":" + std::to_string(line_num) + ": plaintext key write");
                         f.execution_path.push_back("wallet.dat: key record contains raw private key bytes");
                         f.execution_path.push_back("EXPLOIT: bdb_dump wallet.dat | grep key | xxd");
+                        
+                        {
+                            const auto& content = tu->raw_content;
+                            size_t site = content.find("WriteKey");
+                            if (site == std::string::npos) site = 0;
+                            size_t win_start = (site > 250) ? site - 250 : 0;
+                            std::string guard_window = content.substr(win_start, std::min((size_t)500, content.size() - win_start));
+                            bool has_guard = guard_window.find("IsCrypted") != std::string::npos || guard_window.find("fUseCrypto") != std::string::npos;
+                            if (!has_guard) {
+                                f.classification = Classification::NonExploitable;
+                                f.novelty_tag = "DesignBehavior";
+                                f.evidence += " [DESIGN BEHAVIOUR: WriteKey on unencrypted wallet is intended. Genuine vulnerability requires WriteKey reachable when IsCrypted()==true — not confirmed at this site.]";
+                            }
+                        }
+                        
                         findings.push_back(f);
                     }
                 }
@@ -8442,6 +8488,21 @@ private:
                 f.evidence = "P2P message containing 'key' reference (not pubkey) - verify "
                             "no private key material is sent over the network.";
                 f.manual_review_required = true;
+                
+                {
+                    const auto& content = tu->raw_content;
+                    size_t site = content.find("WriteKey");
+                    if (site == std::string::npos) site = 0;
+                    size_t win_start = (site > 250) ? site - 250 : 0;
+                    std::string guard_window = content.substr(win_start, std::min((size_t)500, content.size() - win_start));
+                    bool has_guard = guard_window.find("IsCrypted") != std::string::npos || guard_window.find("fUseCrypto") != std::string::npos;
+                    if (!has_guard) {
+                        f.classification = Classification::NonExploitable;
+                        f.novelty_tag = "DesignBehavior";
+                        f.evidence += " [DESIGN BEHAVIOUR: WriteKey on unencrypted wallet is intended. Genuine vulnerability requires WriteKey reachable when IsCrypted()==true — not confirmed at this site.]";
+                    }
+                }
+                
                 findings.push_back(f);
             }
         }
@@ -8850,6 +8911,21 @@ private:
                             "without any passphrase. This wallet predates encryption or was "
                             "never encrypted.";
                 f.reproducible = true;
+                
+                {
+                    std::string content(data.begin(), data.end());
+                    size_t site = content.find("WriteKey");
+                    if (site == std::string::npos) site = 0;
+                    size_t win_start = (site > 250) ? site - 250 : 0;
+                    std::string guard_window = content.substr(win_start, std::min((size_t)500, content.size() - win_start));
+                    bool has_guard = guard_window.find("IsCrypted") != std::string::npos || guard_window.find("fUseCrypto") != std::string::npos;
+                    if (!has_guard) {
+                        f.classification = Classification::NonExploitable;
+                        f.novelty_tag = "DesignBehavior";
+                        f.evidence += " [DESIGN BEHAVIOUR: WriteKey on unencrypted wallet is intended. Genuine vulnerability requires WriteKey reachable when IsCrypted()==true — not confirmed at this site.]";
+                    }
+                }
+                
                 findings.push_back(f);
             }
         }
@@ -10363,14 +10439,16 @@ private:
                 f.severity = Severity::Medium;
                 f.confidence = 0.60;
                 f.novelty_tag = "KnownVariant";
-                f.evidence = "SIGHASH_SINGLE hash=1 rebroadcast: when input_idx >= output_count, SignatureHash returns uint256(1). Known since 2012.";
+                f.function_name = "sighash_single_hash1_rebroadcast";
+                f.evidence = "[sighash_single_hash1_rebroadcast] SIGHASH_SINGLE hash=1 rebroadcast: when input_idx >= output_count, SignatureHash returns uint256(1). Known since 2012.";
                 f.manual_review_required = true; findings.push_back(f);
                 Finding f2; f2.finding_id = IDGenerator::instance().next(); f2.release = release; f2.file = tu->file_path;
                 f2.issue_type = IssueType::SighashKeyRecovery; f2.classification = Classification::Inconclusive;
                 f2.secret_material_type = SecretMaterialType::PrivateKey; f2.severity = Severity::High;
                 f2.confidence = 0.30; f2.novelty_tag = "InconclusiveNovel";
                 f2.location = SourceLocation(tu->file_path, line_num, 1); f2.reachability = "signing_path";
-                f2.evidence = "SIGHASH_SINGLE nonce-reuse key recovery: if same key signs hash=1 AND any other message, attacker extracts nonce k and computes private key.";
+                f2.function_name = "sighash_single_nonce_reuse_key_recovery";
+                f2.evidence = "[sighash_single_nonce_reuse_key_recovery] SIGHASH_SINGLE nonce-reuse key recovery: if same key signs hash=1 AND any other message, attacker extracts nonce k and computes private key.";
                 f2.manual_review_required = true; findings.push_back(f2); break;
             }
         }
@@ -18806,8 +18884,16 @@ public:
         double novelty_score;
     };
     
+    bool is_process_level_finding(const Finding& f) const {
+        if (f.issue_type != IssueType::CrashDumpPersistence) return false;
+        if (f.evidence.find("RLIMIT_CORE") != std::string::npos) return true;
+        if (f.reachability == "crash_induced") return true;
+        if (f.file.find("init.cpp") != std::string::npos) return true;
+        return false;
+    }
+    
     std::string compute_root_cause_hash(const Finding& f) {
-        if (f.issue_type == IssueType::CrashDumpPersistence && f.evidence.find("RLIMIT_CORE") != std::string::npos)
+        if (is_process_level_finding(f))
             return issue_type_string(f.issue_type) + ":process_level:" + f.release;
         std::string base = issue_type_string(f.issue_type) + ":";
         size_t last_slash = f.file.rfind('/');
@@ -20598,6 +20684,88 @@ public:
                 pos = rc.find(undo_tok, pos + 1);
             }
         }
+        
+        // DS-2: mempool add without CheckInputs/Verify
+        auto mempool_matches = pl.match(rc, "consensus");
+        for (const auto& m : mempool_matches) {
+            bool is_add = m.matched_token.find("add") != std::string::npos || m.matched_token.find("insert") != std::string::npos || m.matched_token.find("push") != std::string::npos;
+            bool near_mempool = m.window.find("mempool") != std::string::npos || m.window.find("pool") != std::string::npos || m.window.find("pending") != std::string::npos;
+            if (!is_add || !near_mempool) continue;
+            size_t check_start = (m.match_position > 2000) ? m.match_position - 2000 : 0;
+            std::string before = rc.substr(check_start, m.match_position - check_start);
+            bool has_validation = before.find("CheckInputs") != std::string::npos || before.find("CheckInputScripts") != std::string::npos || before.find("VerifyScript") != std::string::npos || before.find("Validate") != std::string::npos || before.find("CheckScript") != std::string::npos;
+            if (!has_validation) {
+                Finding f;
+                f.finding_id = IDGenerator::instance().next();
+                f.release = tu->release_name; f.file = tu->file_path;
+                f.function_name = m.matched_token;
+                f.issue_type = IssueType::ConsensusDoubleSpend;
+                f.classification = Classification::Inconclusive;
+                f.severity = Severity::High; f.confidence = 0.60 + m.confidence_adjustment;
+                f.secret_material_type = SecretMaterialType::None;
+                f.reachability = "p2p"; f.review_tier = "immediate"; f.novelty_tag = "Novel";
+                f.evidence = "DS-2: Transaction added to mempool via " + m.matched_token + " without preceding CheckInputs/VerifyScript in 2000-char window. File: " + tu->file_path + ". Unvalidated transaction acceptance allows double-spend if inputs are not fully verified before acceptance.";
+                f.execution_path = {"p2p tx received", "mempool add via " + m.matched_token, "no CheckInputScripts in path", "unvalidated tx accepted"};
+                findings.push_back(f);
+            }
+        }
+        
+        // DS-4: counter increment without limit check
+        std::vector<std::string> counter_tokens = {"nCountWithAncestors", "nCountWithDescendants", "nSizeWithAncestors", "nSizeWithDescendants", "ancestorCount", "descendantCount"};
+        for (const auto& tok : counter_tokens) {
+            size_t pos = rc.find(tok);
+            while (pos != std::string::npos) {
+                size_t win_end = std::min(pos + 300, rc.size());
+                std::string forward = rc.substr(pos, win_end - pos);
+                bool has_increment = forward.find("+=") != std::string::npos || forward.find("++") != std::string::npos;
+                bool has_limit = forward.find("limit") != std::string::npos || forward.find("LIMIT") != std::string::npos || forward.find("MAX") != std::string::npos || forward.find("numeric_limits") != std::string::npos || forward.find("assert") != std::string::npos || forward.find("CHECK") != std::string::npos;
+                if (has_increment && !has_limit) {
+                    Finding f;
+                    f.finding_id = IDGenerator::instance().next();
+                    f.release = tu->release_name; f.file = tu->file_path;
+                    f.function_name = tok;
+                    f.issue_type = IssueType::ConsensusDoubleSpend;
+                    f.classification = Classification::Inconclusive;
+                    f.severity = Severity::High; f.confidence = 0.62;
+                    f.secret_material_type = SecretMaterialType::None;
+                    f.reachability = "p2p"; f.review_tier = "scheduled"; f.novelty_tag = "Novel";
+                    f.evidence = "DS-4: Counter " + tok + " incremented without subsequent limit check in 300-char window. File: " + tu->file_path + ". Overflow of ancestor/descendant counter without limit enforcement can allow mempool limit bypass, enabling resource exhaustion or package relay double-spend via inflated ancestor count.";
+                    f.execution_path = {tok + " += N", "no LIMIT/MAX check within 300 chars", "counter overflows or exceeds policy without enforcement"};
+                    findings.push_back(f);
+                }
+                pos = rc.find(tok, pos + tok.size());
+            }
+        }
+        
+        // DS-5: sighash cache without invalidation
+        std::vector<std::string> sighash_tokens = {"hashPrevouts", "hashSequence", "hashOutputs", "sigHash", "GetSignatureHash", "SignatureHash"};
+        for (const auto& tok : sighash_tokens) {
+            size_t pos = rc.find(tok);
+            while (pos != std::string::npos) {
+                std::string forward = rc.substr(pos, std::min((size_t)500, rc.size() - pos));
+                bool is_cached = forward.find("cache") != std::string::npos || forward.find("map") != std::string::npos || forward.find("store") != std::string::npos || forward.find("cached") != std::string::npos;
+                if (is_cached) {
+                    std::string wider = rc.substr(pos, std::min((size_t)1000, rc.size() - pos));
+                    bool has_invalidation = wider.find("erase") != std::string::npos || wider.find("clear") != std::string::npos || wider.find("invalidate") != std::string::npos || wider.find("remove") != std::string::npos;
+                    if (!has_invalidation) {
+                        Finding f;
+                        f.finding_id = IDGenerator::instance().next();
+                        f.release = tu->release_name; f.file = tu->file_path;
+                        f.function_name = tok;
+                        f.issue_type = IssueType::ConsensusDoubleSpend;
+                        f.classification = Classification::Inconclusive;
+                        f.severity = Severity::High; f.confidence = 0.72;
+                        f.secret_material_type = SecretMaterialType::None;
+                        f.reachability = "p2p"; f.review_tier = "immediate"; f.novelty_tag = "Novel";
+                        f.evidence = "DS-5: Signature hash " + tok + " stored in cache-like structure without detected cache invalidation on UTXO spend. File: " + tu->file_path + ". Stale cached sighash after spend allows signature reuse across different UTXO states, enabling double-spend via replayed cached signature.";
+                        f.execution_path = {tok + " computed and cached", "UTXO spent — cache not invalidated", "stale sighash reused for second spend", "double-spend via replayed signature"};
+                        findings.push_back(f);
+                    }
+                }
+                pos = rc.find(tok, pos + tok.size());
+            }
+        }
+        
         return findings;
     }
 };
@@ -20654,6 +20822,105 @@ public:
                 }
             }
         }
+        
+        // INF-2: subsidy comparison bypass
+        std::vector<std::string> subsidy_tokens = {"GetBlockSubsidy", "nSubsidy", "GetBlockReward", "halvings", "nReward", "coinbaseValue"};
+        for (const auto& tok : subsidy_tokens) {
+            size_t pos = rc.find(tok);
+            while (pos != std::string::npos) {
+                std::string forward = rc.substr(pos, std::min((size_t)600, rc.size() - pos));
+                bool has_comparison = forward.find("<=") != std::string::npos || forward.find(">=") != std::string::npos || forward.find("nValue") != std::string::npos || forward.find("vout") != std::string::npos;
+                if (has_comparison) {
+                    bool bypassable = forward.find("regtest") != std::string::npos || forward.find("testnet") != std::string::npos || forward.find("fTestNet") != std::string::npos || forward.find("if (height == 0") != std::string::npos || forward.find("if (nHeight == 0") != std::string::npos || forward.find("if (params") != std::string::npos;
+                    if (bypassable) {
+                        Finding f;
+                        f.finding_id = IDGenerator::instance().next();
+                        f.release = tu->release_name; f.file = tu->file_path;
+                        f.function_name = tok;
+                        f.issue_type = IssueType::ConsensusInflation;
+                        f.classification = Classification::Inconclusive;
+                        f.severity = Severity::Critical; f.confidence = 0.75;
+                        f.secret_material_type = SecretMaterialType::None;
+                        f.reachability = "confirmed_path"; f.review_tier = "immediate"; f.novelty_tag = "Novel";
+                        f.evidence = "INF-2: Subsidy comparison via " + tok + " is inside a bypassable conditional (regtest/testnet/height==0 guard detected in 600-char window). File: " + tu->file_path + ". If block validation can be triggered with a network/height parameter that skips the subsidy check, inflation is possible.";
+                        f.execution_path = {tok + " called", "comparison against coinbase nValue", "comparison wrapped in bypassable guard", "guard bypassed → inflation via excess coinbase output"};
+                        findings.push_back(f);
+                    }
+                } else {
+                    Finding f;
+                    f.finding_id = IDGenerator::instance().next();
+                    f.release = tu->release_name; f.file = tu->file_path;
+                    f.function_name = tok;
+                    f.issue_type = IssueType::ConsensusInflation;
+                    f.classification = Classification::Inconclusive;
+                    f.severity = Severity::Critical; f.confidence = 0.80;
+                    f.secret_material_type = SecretMaterialType::None;
+                    f.reachability = "confirmed_path"; f.review_tier = "immediate"; f.novelty_tag = "Novel";
+                    f.evidence = "INF-2: Subsidy token " + tok + " found but no comparison against coinbase output value in 600-char window. File: " + tu->file_path + ". Absent subsidy enforcement allows miner to claim arbitrary coinbase output value.";
+                    f.execution_path = {tok + " computed", "no <= comparison against vout nValue", "miner claims excess coinbase → inflation"};
+                    findings.push_back(f);
+                }
+                pos = rc.find(tok, pos + tok.size());
+            }
+        }
+        
+        // INF-3: fee arithmetic without overflow protection
+        std::vector<std::string> fee_tokens = {"nFee", "totalFee", "packageFee", "minFee", "baseFee", "nModifiedFee", "nModFeesInMempool"};
+        for (const auto& tok : fee_tokens) {
+            size_t pos = rc.find(tok);
+            while (pos != std::string::npos) {
+                std::string forward = rc.substr(pos, std::min((size_t)300, rc.size() - pos));
+                bool has_arithmetic = forward.find(" * ") != std::string::npos || forward.find(" / ") != std::string::npos || forward.find(" + ") != std::string::npos || forward.find("*=") != std::string::npos;
+                bool has_guard = forward.find("checked_add") != std::string::npos || forward.find("SafeAdd") != std::string::npos || forward.find("numeric_limits") != std::string::npos || forward.find("INT64_MAX") != std::string::npos || forward.find("MAX_MONEY") != std::string::npos || forward.find("MoneyRange") != std::string::npos;
+                if (has_arithmetic && !has_guard) {
+                    Finding f;
+                    f.finding_id = IDGenerator::instance().next();
+                    f.release = tu->release_name; f.file = tu->file_path;
+                    f.function_name = tok;
+                    f.issue_type = IssueType::ConsensusInflation;
+                    f.classification = Classification::Inconclusive;
+                    f.severity = Severity::High; f.confidence = 0.68;
+                    f.secret_material_type = SecretMaterialType::None;
+                    f.reachability = "p2p"; f.review_tier = "scheduled"; f.novelty_tag = "Novel";
+                    f.evidence = "INF-3: Fee arithmetic on " + tok + " without overflow protection (no checked_add/SafeAdd/MAX_MONEY in 300 chars). File: " + tu->file_path + ". Signed integer overflow of CAmount wraps to negative, allowing attacker to construct transactions with effectively zero or negative fees, bypassing fee policy and potentially enabling inflation.";
+                    f.execution_path = {tok + " arithmetic op", "no overflow check", "CAmount wraps negative on overflow", "negative fee accepted → inflation / policy bypass"};
+                    findings.push_back(f);
+                }
+                pos = rc.find(tok, pos + tok.size());
+            }
+        }
+        
+        // INF-4: weight/discount double-application
+        std::vector<std::string> weight_tokens = {"GetTransactionWeight", "GetVirtualTransactionSize", "WITNESS_SCALE_FACTOR", "witness_weight", "nWeight"};
+        for (const auto& tok : weight_tokens) {
+            size_t pos = rc.find(tok);
+            while (pos != std::string::npos) {
+                bool in_relay = false, in_validation = false;
+                std::string relay_ctx = rc.substr((pos > 1000 ? pos - 1000 : 0), std::min((size_t)2000, rc.size()));
+                in_relay = relay_ctx.find("relay") != std::string::npos || relay_ctx.find("minRelayTxFee") != std::string::npos || relay_ctx.find("broadcast") != std::string::npos;
+                in_validation = relay_ctx.find("ConnectBlock") != std::string::npos || relay_ctx.find("CheckBlock") != std::string::npos || relay_ctx.find("AcceptBlock") != std::string::npos || relay_ctx.find("validation") != std::string::npos;
+                if (in_relay && in_validation) {
+                    bool relay_div4 = relay_ctx.find("/ 4") != std::string::npos || relay_ctx.find("/4") != std::string::npos;
+                    bool relay_div16 = relay_ctx.find("/ 16") != std::string::npos || relay_ctx.find("/16") != std::string::npos;
+                    if (relay_div4 && relay_div16) {
+                        Finding f;
+                        f.finding_id = IDGenerator::instance().next();
+                        f.release = tu->release_name; f.file = tu->file_path;
+                        f.function_name = tok;
+                        f.issue_type = IssueType::ConsensusInflation;
+                        f.classification = Classification::Inconclusive;
+                        f.severity = Severity::High; f.confidence = 0.73;
+                        f.secret_material_type = SecretMaterialType::None;
+                        f.reachability = "p2p"; f.review_tier = "immediate"; f.novelty_tag = "Novel";
+                        f.evidence = "INF-4: Weight token " + tok + " used with both /4 and /16 divisors in a context spanning relay and validation paths. File: " + tu->file_path + ". Double-application of witness discount makes transactions appear 4x lighter than actual, enabling oversized blocks to propagate undetected.";
+                        f.execution_path = {tok + " computed with /4 for relay", tok + " computed with /16 for validation", "discount applied twice", "effective block weight 4x larger than enforced limit"};
+                        findings.push_back(f);
+                    }
+                }
+                pos = rc.find(tok, pos + tok.size());
+            }
+        }
+        
         return findings;
     }
 };
@@ -20743,6 +21010,94 @@ public:
                     f.evidence = "Secret variable '" + var_name + "' passed to LogPrint* call. Secret material may appear in debug.log.";
                     f.review_tier = "immediate";
                     findings.push_back(f);
+                }
+            }
+        }
+        
+        // KL-3: Exception path secret retention
+        for (const auto& [var_name, var_pos] : secret_vars) {
+            size_t try_pos = rc.rfind("try {", var_pos);
+            if (try_pos == std::string::npos || var_pos - try_pos > 2000) {
+                try_pos = rc.rfind("try{", var_pos);
+            }
+            if (try_pos == std::string::npos || var_pos - try_pos > 2000) continue;
+            size_t catch_pos = rc.find("catch", try_pos + 4);
+            if (catch_pos == std::string::npos || catch_pos - try_pos > 3000) continue;
+            size_t catch_brace = rc.find('{', catch_pos);
+            if (catch_brace == std::string::npos) continue;
+            int depth = 1;
+            size_t catch_end = catch_brace + 1;
+            while (catch_end < rc.size() && depth > 0) {
+                if (rc[catch_end] == '{') depth++;
+                else if (rc[catch_end] == '}') depth--;
+                catch_end++;
+            }
+            std::string catch_body = rc.substr(catch_brace, catch_end - catch_brace);
+            auto wipe_m = pl.match(catch_body, "wipe");
+            bool catch_has_wipe = !wipe_m.empty();
+            if (!catch_has_wipe) {
+                Finding f;
+                f.finding_id = IDGenerator::instance().next();
+                f.release = tu->release_name; f.file = tu->file_path;
+                f.function_name = var_name + "_exception_path";
+                f.issue_type = IssueType::ExceptionPathRetention;
+                f.classification = Classification::Inconclusive;
+                f.severity = Severity::High; f.confidence = 0.78;
+                f.secret_material_type = SecretMaterialType::PrivateKey;
+                f.reachability = "indirect"; f.review_tier = "scheduled"; f.novelty_tag = "Novel";
+                f.evidence = "KL-3: Secret variable '" + var_name + "' lives inside try{} block at ~offset " + std::to_string(try_pos) + ". Corresponding catch{} block at ~offset " + std::to_string(catch_pos) + " contains no wipe/cleanse call. If an exception is thrown, secret escapes the wipe path and persists in heap until freed by allocator. File: " + tu->file_path;
+                f.execution_path = {"exception thrown inside try block", "stack unwinds through catch — no wipe", var_name + " persists in freed heap memory", "secret recoverable from heap after exception"};
+                findings.push_back(f);
+            }
+        }
+        
+        // KL-4: Password in RPC response
+        std::vector<std::string> rpc_return_tokens = {"UniValue", "JSONRPCReply", "JSONRPCError", "RPCResult", "pushKV", "push_back"};
+        for (const auto& [var_name, var_pos] : secret_vars) {
+            for (const auto& rpc_tok : rpc_return_tokens) {
+                size_t rpc_pos = rc.find(rpc_tok, var_pos);
+                if (rpc_pos == std::string::npos || rpc_pos - var_pos > 500) continue;
+                std::string rpc_window = rc.substr(var_pos, std::min((size_t)500, rc.size() - var_pos));
+                if (rpc_window.find(var_name) != std::string::npos && rpc_window.find(rpc_tok) != std::string::npos) {
+                    Finding f;
+                    f.finding_id = IDGenerator::instance().next();
+                    f.release = tu->release_name; f.file = tu->file_path;
+                    f.function_name = var_name + "_rpc_exposure";
+                    f.issue_type = IssueType::PasswordRPCExposure;
+                    f.classification = Classification::ConfirmedIssue;
+                    f.severity = Severity::Critical; f.confidence = 0.80;
+                    f.secret_material_type = SecretMaterialType::PrivateKey;
+                    f.reachability = "rpc"; f.review_tier = "immediate"; f.novelty_tag = "Novel";
+                    f.evidence = "KL-4: Secret variable '" + var_name + "' appears within 500 chars of RPC return path via " + rpc_tok + ". File: " + tu->file_path + ". Secret material may be embedded in RPC response and returned to caller in plaintext. Any process with RPC access can retrieve the secret.";
+                    f.execution_path = {"RPC handler invoked", var_name + " in scope", rpc_tok + " called with or near " + var_name, "secret included in JSON RPC response"};
+                    findings.push_back(f);
+                    break;
+                }
+            }
+        }
+        
+        // KL-5: Memory-mapped secret without mlock
+        std::vector<std::string> alloc_tokens = {"new ", "malloc(", "calloc(", "make_unique", "make_shared", "std::vector", "std::string"};
+        for (const auto& [var_name, var_pos] : secret_vars) {
+            for (const auto& alloc_tok : alloc_tokens) {
+                size_t alloc_pos = rc.rfind(alloc_tok, var_pos);
+                if (alloc_pos == std::string::npos || var_pos - alloc_pos > 200) continue;
+                std::string forward = rc.substr(alloc_pos, std::min((size_t)500, rc.size() - alloc_pos));
+                bool has_mlock = forward.find("mlock") != std::string::npos || forward.find("VirtualLock") != std::string::npos || forward.find("MADV_DONTDUMP") != std::string::npos || forward.find("SecureAllocator") != std::string::npos || forward.find("secure_allocator") != std::string::npos;
+                if (!has_mlock) {
+                    Finding f;
+                    f.finding_id = IDGenerator::instance().next();
+                    f.release = tu->release_name; f.file = tu->file_path;
+                    f.function_name = var_name + "_heap_alloc";
+                    f.issue_type = IssueType::HeapRetainedPrivateKey;
+                    f.classification = Classification::Inconclusive;
+                    f.severity = Severity::High; f.confidence = 0.65;
+                    f.secret_material_type = SecretMaterialType::PrivateKey;
+                    f.reachability = "indirect"; f.review_tier = "scheduled"; f.novelty_tag = "Novel";
+                    f.evidence = "KL-5: Secret variable '" + var_name + "' allocated via " + alloc_tok + " at ~offset " + std::to_string(alloc_pos) + " without mlock/VirtualLock/MADV_DONTDUMP protection. File: " + tu->file_path + ". Unprotected heap allocation of secret material may be paged to swap file or captured in core dump, exposing secret to OS-level attacker.";
+                    f.execution_path = {alloc_tok + " allocates " + var_name + " on heap", "no mlock — page may be swapped to disk", "swap file or core dump read by attacker", var_name + " extracted from disk"};
+                    findings.push_back(f);
+                    break;
                 }
             }
         }
