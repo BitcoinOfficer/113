@@ -11320,6 +11320,47 @@ private:
     std::string novelty_status_to_string(NoveltyClassifier::NoveltyStatus status);
 };
 
+// ============================================================================
+// FIX 12: Local Release Loading Helpers
+// ============================================================================
+
+static std::string normalise_release_key(const std::string& raw) {
+    std::string key = raw;
+    // Strip leading "./" or "/"
+    while (!key.empty() && (key[0] == '.' || key[0] == '/')) key = key.substr(1);
+    // Strip trailing whitespace or slashes
+    while (!key.empty() && (key.back() == '/' || key.back() == ' ')) key.pop_back();
+    // Extract just the version folder name if a full path was passed
+    size_t last_sep = key.rfind('/');
+    if (last_sep != std::string::npos) key = key.substr(last_sep + 1);
+    // Result is the folder name as-is, e.g. "v0.14.2", "v28.1", "v27-final"
+    return key;
+}
+
+static const std::vector<std::string>& local_release_dirs() {
+    static const std::vector<std::string> dirs = {
+        "v0.14.2", "v0.14.2rc1", "v0.14.2rc2", "v0.14.3", "v0.15.0", "v0.15.0.1", "v0.15.0rc1", "v0.15.0rc2", "v0.15.0rc3", "v0.15.1", "v0.15.1rc1", "v0.15.2",
+        "v0.16-final","v0.16.0", "v0.16.0rc1", "v0.16.0rc2", "v0.16.0rc3", "v0.16.0rc4", "v0.16.1", "v0.16.1rc1", "v0.16.1rc2", "v0.16.2", "v0.16.2rc1", "v0.16.2rc2", "v0.16.3",
+        "v0.17-final", "v0.17.0", "v0.17.0.1", "v0.17.0rc1", "v0.17.0rc2", "v0.17.0rc3", "v0.17.0rc4", "v0.17.1", "v0.17.1rc1", "v0.17.2", "v0.17.2rc1", "v0.17.2rc2",
+        "v0.18-final", "v0.18.0", "v0.18.0rc1", "v0.18.0rc2", "v0.18.0rc3", "v0.18.0rc4", "v0.18.1", "v0.18.1rc1",
+        "v0.19-final", "v0.19.0", "v0.19.0.1", "v0.19.0rc1", "v0.19.0rc2", "v0.19.0rc3", "v0.19.1", "v0.19.1rc1", "v0.19.1rc2", "v0.19.2", "v0.19.2rc1",
+        "v0.20-final","v0.20.0", "v0.20.0rc1", "v0.20.0rc2", "v0.20.1", "v0.20.1rc1", "v0.20.2", "v0.20.2rc1", "v0.20.2rc2", "v0.20.2rc3",
+        "v0.21-final", "v0.21.0", "v0.21.0rc1", "v0.21.0rc2", "v0.21.0rc3", "v0.21.0rc4", "v0.21.0rc5", "v0.21.1", "v0.21.1rc1", "v0.21.2", "v0.21.2rc1", "v0.21.2rc2",
+        "v21.99-guixtest1",
+        "v22-final", "v22.0", "v22.0rc1", "v22.0rc2", "v22.0rc3", "v22.1", "v22.1rc1", "v22.1rc2",
+        "v23-final", "v23.0", "v23.0rc1", "v23.0rc2", "v23.0rc3", "v23.0rc4", "v23.0rc5", "v23.1", "v23.1rc1", "v23.1rc2", "v23.2", "v23.2rc1",
+        "v24-final", "v24.0", "v24.0rc1", "v24.0rc2", "v24.0rc3", "v24.0rc4", "v24.1", "v24.1rc1", "v24.1rc2", "v24.1rc3", "v24.2", "v24.2rc1",
+        "v25-final", "v25.0", "v25.0rc1", "v25.0rc2", "v25.1", "v25.1rc1", "v25.2", "v25.2rc1", "v25.2rc2",
+        "v26-final", "v26.0", "v26.0rc1", "v26.0rc2", "v26.0rc3", "v26.1", "v26.1rc1", "v26.1rc2", "v26.2", "v26.2rc1",
+        "v27-final", "v27.0", "v27.0rc1", "v27.1", "v27.1rc1", "v27.2", "v27.2rc1",
+        "v28.0", "v28.0rc1", "v28.0rc2", "v28.1", "v28.1rc1", "v28.1rc2", "v28.2", "v28.2rc1", "v28.2rc2", "v28.3", "v28.3rc1", "v28.3rc2", "v28.4", "v28.4rc1", "v28.4rc2",
+        "v29.0", "v29.0rc1", "v29.0rc2", "v29.0rc3", "v29.1", "v29.1rc1", "v29.1rc2", "v29.2", "v29.2rc1", "v29.2rc2", "v29.3", "v29.3rc1", "v29.3rc2",
+        "v30.0", "v30.0rc1", "v30.0rc2", "v30.0rc3", "v30.1", "v30.1rc1", "v30.2", "v30.2rc1",
+        "v31.0", "v31.0rc1", "v31.0rc2", "v31.0rc3", "v31.0rc4"
+    };
+    return dirs;
+}
+
 class AuditOrchestrator {
 public:
     explicit AuditOrchestrator(const AnalysisConfig& config)
@@ -11640,6 +11681,16 @@ private:
     }
 
     void ingest_releases() {
+        // FIX 12: If no release paths provided, auto-load from local releases folder
+        if (config_.release_paths.empty()) {
+            const char* home = getenv("HOME");
+            std::string releases_base = home ? (std::string(home) + "/Downloads/releases") : "./releases";
+            Logger::instance().info("No release paths specified - loading all releases from " + releases_base);
+            load_local_releases(releases_base);
+            return;
+        }
+        
+        // Original path: load from explicit paths
         FileDiscoveryEngine discovery;
         for (size_t i = 0; i < config_.release_paths.size(); i++) {
             std::string path = config_.release_paths[i];
@@ -11667,8 +11718,66 @@ private:
 
             CompileDatabaseGenerator cdb_gen;
             cdb_gen.write_compile_commands(release, path + "/compile_commands.json");
-            releases_[name] = std::move(release);
+            std::string norm_key = normalise_release_key(name);
+            releases_[norm_key] = std::move(release);
         }
+    }
+    
+    void load_local_releases(const std::string& releases_base_path) {
+        FileDiscoveryEngine discovery;
+        
+        for (const auto& dir_name : local_release_dirs()) {
+            std::string release_path = releases_base_path + "/" + dir_name;
+            
+            // Confirm the directory exists
+            if (!std::filesystem::exists(release_path) || !std::filesystem::is_directory(release_path)) {
+                Logger::instance().warning("load_local_releases: directory not found: " + release_path + " — skipping");
+                continue;
+            }
+            
+            // Find the src/ subtree — may be one level deep (release_path/src/)
+            // or two levels deep (release_path/bitcoin-<tag>/src/)
+            std::string src_root = "";
+            if (std::filesystem::exists(release_path + "/src")) {
+                src_root = release_path;
+            } else {
+                for (const auto& sub : std::filesystem::directory_iterator(release_path)) {
+                    if (sub.is_directory() && std::filesystem::exists(sub.path() / "src")) {
+                        src_root = sub.path().string();
+                        break;
+                    }
+                }
+            }
+            
+            if (src_root.empty()) {
+                Logger::instance().warning("load_local_releases: no src/ found under " + release_path + " — skipping");
+                continue;
+            }
+            
+            ReleaseInfo release;
+            release.name = dir_name;
+            release.base_path = release_path;
+            
+            auto files = discovery.discover_files(src_root);
+            for (const auto& f : files) {
+                release.all_files.push_back(f.path);
+                if (f.is_source) release.source_files.push_back(f.path);
+                if (f.is_header) release.header_files.push_back(f.path);
+            }
+            
+            release.include_paths = discovery.discover_include_paths(src_root);
+            release.build_system = discovery.detect_build_system(src_root);
+            release.build_defines = discovery.extract_build_defines(src_root);
+            release.ingested = true;
+            
+            std::string norm_key = normalise_release_key(dir_name);
+            releases_[norm_key] = std::move(release);
+            
+            Logger::instance().info("load_local_releases: loaded release " + dir_name + " (" + norm_key + "): " +
+                                   std::to_string(release.source_files.size() + release.header_files.size()) + " source files");
+        }
+        
+        Logger::instance().info("load_local_releases: loaded " + std::to_string(releases_.size()) + " releases from " + releases_base_path);
     }
 
     void parse_all_sources() {
@@ -20117,8 +20226,11 @@ private:
 };
 
 // ============================================================================
-// IMPROVEMENT 17: BitcoinCoreReleaseManager
+// IMPROVEMENT 17: BitcoinCoreReleaseManager (DISABLED - FIX 12)
 // ============================================================================
+// FIX 12: GitHub fetching is replaced with local directory loading.
+// This class is kept for reference but is not used.
+#if 0
 class BitcoinCoreReleaseManager {
 public:
     struct ReleaseRecord {
@@ -20196,6 +20308,7 @@ public:
         return r.download_succeeded;
     }
 };
+#endif // FIX 12: BitcoinCoreReleaseManager disabled
 
 // ============================================================================
 // IMPROVEMENT 18: PatternLibrary
