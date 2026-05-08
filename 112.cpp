@@ -11315,9 +11315,11 @@ class EnhancedReportEmitter;
 class NoveltyExpansionOrchestrator {
 public:
     void run(const std::vector<Release>& releases, std::vector<Finding>& all_findings);
-    
+
 private:
     std::string novelty_status_to_string(NoveltyClassifier::NoveltyStatus status);
+    // releases_ map: key = normalise_release_key(dir_name), value = ReleaseInfo
+    std::map<std::string, ReleaseInfo> releases_;
 };
 
 class AuditOrchestrator {
@@ -20118,82 +20120,158 @@ private:
 
 // ============================================================================
 // IMPROVEMENT 17: BitcoinCoreReleaseManager
+// Local-disk loader — no network operations, no GitHub API calls.
+// All releases are pre-cloned under ~/Downloads/releases/
 // ============================================================================
 class BitcoinCoreReleaseManager {
 public:
     struct ReleaseRecord {
         std::string version_tag;
         std::string canonical_name;
-        std::string tarball_url;
         std::string local_path;
         bool already_present = false;
-        bool download_attempted = false;
-        bool download_succeeded = false;
         bool scan_completed = false;
     };
 
-    static const std::vector<std::string>& known_versions() {
-        static std::vector<std::string> v = {
-            "0.13.0", "0.14.1", "0.15.0", "0.17.0", "0.18.1",
-            "0.19.1", "0.20.0", "24.0.1", "28.1", "31.0"
+    // Normalise a raw path or folder name to a bare version key, e.g. "v0.14.2"
+    static std::string normalise_release_key(const std::string& raw) {
+        std::string key = raw;
+        // Strip leading "./" or "/"
+        while (!key.empty() && (key[0] == '.' || key[0] == '/'))
+            key = key.substr(1);
+        // Strip trailing whitespace or slashes
+        while (!key.empty() && (key.back() == '/' || key.back() == ' '))
+            key.pop_back();
+        // Extract just the version folder name if a full path was passed
+        size_t last_sep = key.rfind('/');
+        if (last_sep != std::string::npos)
+            key = key.substr(last_sep + 1);
+        // Result is the folder name as-is, e.g. "v0.14.2", "v28.1", "v27-final"
+        return key;
+    }
+
+    // Complete hardcoded list of all pre-cloned release directories
+    static const std::vector<std::string>& local_release_dirs() {
+        static const std::vector<std::string> dirs = {
+            "v0.14.2",    "v0.14.2rc1",  "v0.14.2rc2",  "v0.14.3",
+            "v0.15.0",    "v0.15.0.1",   "v0.15.0rc1",  "v0.15.0rc2",  "v0.15.0rc3",
+            "v0.15.1",    "v0.15.1rc1",  "v0.15.2",
+            "v0.16-final","v0.16.0",     "v0.16.0rc1",  "v0.16.0rc2",  "v0.16.0rc3",  "v0.16.0rc4",
+            "v0.16.1",    "v0.16.1rc1",  "v0.16.1rc2",  "v0.16.2",     "v0.16.2rc1",  "v0.16.2rc2",
+            "v0.16.3",
+            "v0.17-final","v0.17.0",     "v0.17.0.1",   "v0.17.0rc1",  "v0.17.0rc2",  "v0.17.0rc3",  "v0.17.0rc4",
+            "v0.17.1",    "v0.17.1rc1",  "v0.17.2",     "v0.17.2rc1",  "v0.17.2rc2",
+            "v0.18-final","v0.18.0",     "v0.18.0rc1",  "v0.18.0rc2",  "v0.18.0rc3",  "v0.18.0rc4",
+            "v0.18.1",    "v0.18.1rc1",
+            "v0.19-final","v0.19.0",     "v0.19.0.1",   "v0.19.0rc1",  "v0.19.0rc2",  "v0.19.0rc3",
+            "v0.19.1",    "v0.19.1rc1",  "v0.19.1rc2",  "v0.19.2",     "v0.19.2rc1",
+            "v0.20-final","v0.20.0",     "v0.20.0rc1",  "v0.20.0rc2",
+            "v0.20.1",    "v0.20.1rc1",  "v0.20.2",     "v0.20.2rc1",  "v0.20.2rc2",  "v0.20.2rc3",
+            "v0.21-final","v0.21.0",     "v0.21.0rc1",  "v0.21.0rc2",  "v0.21.0rc3",  "v0.21.0rc4",  "v0.21.0rc5",
+            "v0.21.1",    "v0.21.1rc1",  "v0.21.2",     "v0.21.2rc1",  "v0.21.2rc2",
+            "v21.99-guixtest1",
+            "v22-final",  "v22.0",       "v22.0rc1",    "v22.0rc2",    "v22.0rc3",
+            "v22.1",      "v22.1rc1",    "v22.1rc2",
+            "v23-final",  "v23.0",       "v23.0rc1",    "v23.0rc2",    "v23.0rc3",    "v23.0rc4",    "v23.0rc5",
+            "v23.1",      "v23.1rc1",    "v23.1rc2",    "v23.2",       "v23.2rc1",
+            "v24-final",  "v24.0",       "v24.0rc1",    "v24.0rc2",    "v24.0rc3",    "v24.0rc4",
+            "v24.1",      "v24.1rc1",    "v24.1rc2",    "v24.1rc3",    "v24.2",       "v24.2rc1",
+            "v25-final",  "v25.0",       "v25.0rc1",    "v25.0rc2",
+            "v25.1",      "v25.1rc1",    "v25.2",       "v25.2rc1",    "v25.2rc2",
+            "v26-final",  "v26.0",       "v26.0rc1",    "v26.0rc2",    "v26.0rc3",
+            "v26.1",      "v26.1rc1",    "v26.1rc2",    "v26.2",       "v26.2rc1",
+            "v27-final",  "v27.0",       "v27.0rc1",
+            "v27.1",      "v27.1rc1",    "v27.2",       "v27.2rc1",
+            "v28.0",      "v28.0rc1",    "v28.0rc2",
+            "v28.1",      "v28.1rc1",    "v28.1rc2",    "v28.2",       "v28.2rc1",    "v28.2rc2",
+            "v28.3",      "v28.3rc1",    "v28.3rc2",    "v28.4",       "v28.4rc1",    "v28.4rc2",
+            "v29.0",      "v29.0rc1",    "v29.0rc2",    "v29.0rc3",
+            "v29.1",      "v29.1rc1",    "v29.1rc2",    "v29.2",       "v29.2rc1",    "v29.2rc2",
+            "v29.3",      "v29.3rc1",    "v29.3rc2",
+            "v30.0",      "v30.0rc1",    "v30.0rc2",    "v30.0rc3",
+            "v30.1",      "v30.1rc1",    "v30.2",       "v30.2rc1",
+            "v31.0",      "v31.0rc1",    "v31.0rc2",    "v31.0rc3",    "v31.0rc4"
         };
-        return v;
+        return dirs;
     }
 
-    std::vector<ReleaseRecord> fetch_release_list() {
-        std::vector<ReleaseRecord> records;
-        std::string cmd = "curl -sL 'https://api.github.com/repos/bitcoin/bitcoin/releases?per_page=100' 2>/dev/null";
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe) { Logger::instance().warning("BitcoinCoreReleaseManager: curl failed"); return records; }
-        std::string output;
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), pipe)) output += buf;
-        pclose(pipe);
-        // Parse tag_name and tarball_url manually
-        std::regex tag_re(R"delim("tag_name"\s*:\s*"v?([^"]+)")delim");
-        std::regex url_re(R"delim("tarball_url"\s*:\s*"([^"]+)")delim");
-        auto tag_begin = std::sregex_iterator(output.begin(), output.end(), tag_re);
-        auto url_begin = std::sregex_iterator(output.begin(), output.end(), url_re);
-        auto tag_it = tag_begin; auto url_it = url_begin;
-        while (tag_it != std::sregex_iterator() && url_it != std::sregex_iterator()) {
-            ReleaseRecord r;
-            r.version_tag = (*tag_it)[1].str();
-            r.canonical_name = r.version_tag;
-            if (r.canonical_name.front() == 'v') r.canonical_name = r.canonical_name.substr(1);
-            r.tarball_url = (*url_it)[1].str();
-            records.push_back(r);
-            ++tag_it; ++url_it;
-        }
-        Logger::instance().info("BitcoinCoreReleaseManager: fetched " + std::to_string(records.size()) + " releases from GitHub");
-        return records;
-    }
+    // Load all pre-cloned releases from disk into the provided releases map.
+    // releases_base_path = e.g. "/home/user/Downloads/releases"
+    // Key in out_releases is normalise_release_key(dir_name).
+    void load_local_releases(const std::string& releases_base_path,
+                             std::map<std::string, ReleaseInfo>& out_releases) {
+        for (const auto& dir_name : local_release_dirs()) {
+            std::string release_path = releases_base_path + "/" + dir_name;
 
-    void check_already_present(std::vector<ReleaseRecord>& records, const std::string& base_dir) {
-        for (auto& r : records) {
-            std::string dir1 = base_dir + "/bitcoin-" + r.canonical_name;
-            std::string dir2 = base_dir + "/Bitcoin-" + r.canonical_name;
-            r.already_present = std::filesystem::exists(dir1) || std::filesystem::exists(dir2);
-            if (r.already_present) r.local_path = std::filesystem::exists(dir1) ? dir1 : dir2;
-            Logger::instance().info(std::string(r.already_present ? "[+] " : "[ ] ") + r.canonical_name);
-        }
-    }
+            if (!std::filesystem::exists(release_path) ||
+                !std::filesystem::is_directory(release_path)) {
+                Logger::instance().warning(
+                    "load_local_releases: directory not found: " + release_path + " — skipping");
+                continue;
+            }
 
-    bool download_and_extract(ReleaseRecord& r, const std::string& dest_dir) {
-        if (r.already_present) return true;
-        for (const auto& kv : known_versions()) if (kv == r.canonical_name) return false; // skip known
-        r.download_attempted = true;
-        std::string filename = "bitcoin-" + r.canonical_name + ".tar.gz";
-        std::string cmd = "curl -sL -o " + dest_dir + "/" + filename + " " + r.tarball_url + " 2>/dev/null";
-        int ret = system(cmd.c_str());
-        if (ret != 0) { r.download_succeeded = false; return false; }
-        std::string extract = "tar -xzf " + dest_dir + "/" + filename + " -C " + dest_dir + " 2>/dev/null";
-        ret = system(extract.c_str());
-        r.download_succeeded = (ret == 0);
-        if (r.download_succeeded) {
-            r.local_path = dest_dir + "/bitcoin-" + r.canonical_name;
-            Logger::instance().info("[DL] Downloaded " + r.canonical_name);
+            // Find the src/ subtree — may be one level deep (release_path/src/)
+            // or two levels deep (release_path/bitcoin-<tag>/src/)
+            std::string src_root;
+            if (std::filesystem::exists(release_path + "/src")) {
+                src_root = release_path;
+            } else {
+                for (const auto& sub : std::filesystem::directory_iterator(release_path)) {
+                    if (sub.is_directory() &&
+                        std::filesystem::exists(sub.path() / "src")) {
+                        src_root = sub.path().string();
+                        break;
+                    }
+                }
+            }
+
+            if (src_root.empty()) {
+                Logger::instance().warning(
+                    "load_local_releases: no src/ found under " + release_path + " — skipping");
+                continue;
+            }
+
+            ReleaseInfo rel;
+            rel.name = dir_name;
+            rel.base_path = release_path;
+            rel.ingested = true;
+            size_t file_count = 0;
+
+            for (const auto& entry :
+                 std::filesystem::recursive_directory_iterator(src_root)) {
+                if (!entry.is_regular_file()) continue;
+                std::string ext = entry.path().extension().string();
+                if (ext != ".cpp" && ext != ".h" && ext != ".cc" && ext != ".cxx") continue;
+
+                std::ifstream ifs(entry.path());
+                if (!ifs.is_open()) {
+                    Logger::instance().warning(
+                        "load_local_releases: cannot open " + entry.path().string());
+                    continue;
+                }
+                std::string content((std::istreambuf_iterator<char>(ifs)),
+                                     std::istreambuf_iterator<char>());
+
+                auto tu = std::make_shared<TranslationUnit>();
+                tu->file_path    = entry.path().string();
+                tu->release_name = dir_name;
+                tu->raw_content  = std::move(content);
+                tu->line_count   = std::count(tu->raw_content.begin(),
+                                              tu->raw_content.end(), '\n');
+                tu->parsed       = true;
+
+                rel.source_files.push_back(tu->file_path);
+                rel.all_files.push_back(tu->file_path);
+                rel.translation_units[tu->file_path] = tu;
+                file_count++;
+            }
+
+            std::string norm_key = normalise_release_key(dir_name);
+            out_releases[norm_key] = std::move(rel);
+            Logger::instance().info(
+                "load_local_releases: loaded release " + dir_name +
+                " (" + norm_key + "): " + std::to_string(file_count) + " source files");
         }
-        return r.download_succeeded;
     }
 };
 
@@ -21131,80 +21209,95 @@ public:
 
 void NoveltyExpansionOrchestrator::run(const std::vector<Release>& releases, std::vector<Finding>& all_findings) {
     Logger::instance().info("NoveltyExpansionOrchestrator::run: starting comprehensive audit across all releases");
-    
+
     auto start_time = std::chrono::steady_clock::now();
-    
-    std::vector<std::string> versions = {"0.13.0", "0.14.1", "0.15.0", "0.17.0", "0.18.1", "0.19.1", "0.20.0", "24.0.1", "28.1", "31.0"};
-    
-    for (const auto& version : versions) {
-        Logger::instance().info("NoveltyExpansionOrchestrator: processing version " + version);
-        
-        const Release* target_release = nullptr;
-        for (const auto& release : releases) {
-            if (release.name == version) {
-                target_release = &release;
-                break;
-            }
+
+    // Hardcoded local releases path — no network required
+    const std::string releases_base = std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/Downloads/releases";
+    BitcoinCoreReleaseManager bcrm;
+    bcrm.load_local_releases(releases_base, releases_);
+    Logger::instance().info("NoveltyExpansionOrchestrator: loaded " +
+        std::to_string(releases_.size()) + " releases from " + releases_base);
+
+    // Helper lambda: run all dynamic engines over a single TranslationUnit
+    auto analyse_tu = [&](TranslationUnit* tu_ptr) {
+        PatternLibrary pattern_lib;
+        pattern_lib.load_patterns();
+        pattern_lib.extend_patterns_from_source(tu_ptr->raw_content, tu_ptr->release_name);
+
+        PackageRelayDoubleSpendAnalyzer pdsa;
+        auto f1 = pdsa.analyze(tu_ptr);
+        all_findings.insert(all_findings.end(), f1.begin(), f1.end());
+
+        DynamicDoubleSpendEngine ddse;
+        auto f_ds = ddse.analyze(tu_ptr, pattern_lib);
+        all_findings.insert(all_findings.end(), f_ds.begin(), f_ds.end());
+
+        DynamicInflationEngine die;
+        auto f_inf = die.analyze(tu_ptr, pattern_lib);
+        all_findings.insert(all_findings.end(), f_inf.begin(), f_inf.end());
+
+        DynamicSecretLeakageEngine dsle;
+        auto f_kl = dsle.analyze(tu_ptr, pattern_lib);
+        all_findings.insert(all_findings.end(), f_kl.begin(), f_kl.end());
+
+        UTXOCacheDivergenceDetector ucd;
+        auto f2 = ucd.analyze(tu_ptr);
+        all_findings.insert(all_findings.end(), f2.begin(), f2.end());
+
+        ReorgSpendReplayDetector rsr;
+        auto f3 = rsr.analyze(tu_ptr);
+        all_findings.insert(all_findings.end(), f3.begin(), f3.end());
+
+        ValueAccountingTracer vat;
+        auto f4 = vat.analyze(tu_ptr);
+        all_findings.insert(all_findings.end(), f4.begin(), f4.end());
+
+        WitnessAccountingInflationDetector waid;
+        auto f5 = waid.detect_witness_weight_undercount(tu_ptr);
+        if (f5.confidence > 0.0) all_findings.push_back(f5);
+
+        WalletSecretLifetimeTracker wslt;
+        auto f6 = wslt.analyze(tu_ptr);
+        all_findings.insert(all_findings.end(), f6.begin(), f6.end());
+        // IterationCountFingerprintEngine: KDF analysis via WalletOraclePoCGenerator
+    };
+
+    // Iterate over all locally-loaded releases (from ~/Downloads/releases/)
+    for (auto& [rel_key, rel_info] : releases_) {
+        Logger::instance().info("NoveltyExpansionOrchestrator: processing release " + rel_key +
+            " (" + std::to_string(rel_info.translation_units.size()) + " TUs)");
+        for (auto& [fp, tu_ptr] : rel_info.translation_units) {
+            if (tu_ptr) analyse_tu(tu_ptr.get());
         }
-        
-        if (!target_release) {
-            Logger::instance().warning("NoveltyExpansionOrchestrator: version " + version + " not found in releases");
-            continue;
-        }
-        
-        for (auto& tu : target_release->translation_units) {
-            PatternLibrary pattern_lib;
-            pattern_lib.load_patterns();
-            pattern_lib.extend_patterns_from_source(tu.raw_content, tu.release_name);
+    }
 
-            PackageRelayDoubleSpendAnalyzer pdsa;
-            auto f1 = pdsa.analyze(const_cast<TranslationUnit*>(&tu));
-            all_findings.insert(all_findings.end(), f1.begin(), f1.end());
-
-            DynamicDoubleSpendEngine ddse;
-            auto f_ds = ddse.analyze(const_cast<TranslationUnit*>(&tu), pattern_lib);
-            all_findings.insert(all_findings.end(), f_ds.begin(), f_ds.end());
-
-            DynamicInflationEngine die;
-            auto f_inf = die.analyze(const_cast<TranslationUnit*>(&tu), pattern_lib);
-            all_findings.insert(all_findings.end(), f_inf.begin(), f_inf.end());
-
-            DynamicSecretLeakageEngine dsle;
-            auto f_kl = dsle.analyze(const_cast<TranslationUnit*>(&tu), pattern_lib);
-            all_findings.insert(all_findings.end(), f_kl.begin(), f_kl.end());
-            
-            UTXOCacheDivergenceDetector ucd;
-            auto f2 = ucd.analyze(const_cast<TranslationUnit*>(&tu));
-            all_findings.insert(all_findings.end(), f2.begin(), f2.end());
-            
-            ReorgSpendReplayDetector rsr;
-            auto f3 = rsr.analyze(const_cast<TranslationUnit*>(&tu));
-            all_findings.insert(all_findings.end(), f3.begin(), f3.end());
-            
-            ValueAccountingTracer vat;
-            auto f4 = vat.analyze(const_cast<TranslationUnit*>(&tu));
-            all_findings.insert(all_findings.end(), f4.begin(), f4.end());
-            
-            WitnessAccountingInflationDetector waid;
-            auto f5 = waid.detect_witness_weight_undercount(const_cast<TranslationUnit*>(&tu));
-            if (f5.confidence > 0.0) all_findings.push_back(f5);
-            
-            WalletSecretLifetimeTracker wslt;
-            auto f6 = wslt.analyze(const_cast<TranslationUnit*>(&tu));
-            all_findings.insert(all_findings.end(), f6.begin(), f6.end());
-            
-            // IterationCountFingerprintEngine: KDF analysis via WalletOraclePoCGenerator
+    // Also process any releases passed in directly (legacy path)
+    for (const auto& release : releases) {
+        // Skip if already loaded from disk
+        std::string norm = BitcoinCoreReleaseManager::normalise_release_key(release.name);
+        if (releases_.count(norm)) continue;
+        Logger::instance().info("NoveltyExpansionOrchestrator: processing passed-in release " + release.name);
+        for (auto& tu : release.translation_units) {
+            analyse_tu(const_cast<TranslationUnit*>(&tu));
         }
     }
     
     Logger::instance().info("NoveltyExpansionOrchestrator: collected " + std::to_string(all_findings.size()) + " raw findings");
 
-    // Wire PristineVerificationEngine â mandatory second-pass verification
+       // Wire PristineVerificationEngine — mandatory second-pass verification
     Logger::instance().info(
         "NoveltyExpansionOrchestrator: running PristineVerificationEngine "
         "over " + std::to_string(all_findings.size()) + " findings");
     PristineVerificationEngine pve;
     std::string combined_content;
+    // Collect content from locally-loaded releases_
+    for (const auto& [rel_key, rel_info] : releases_) {
+        for (const auto& [fp, tu_ptr] : rel_info.translation_units) {
+            if (tu_ptr) combined_content += tu_ptr->raw_content + "\n";
+        }
+    }
+    // Also include passed-in releases
     for (const auto& release : releases) {
         for (const auto& tu : release.translation_units) {
             combined_content += tu.raw_content + "\n";
@@ -21214,9 +21307,12 @@ void NoveltyExpansionOrchestrator::run(const std::vector<Release>& releases, std
     pve_pl.load_patterns();
     pve.run_verification_pass(all_findings, combined_content, pve_pl);
     Logger::instance().info(
-        "NoveltyExpansionOrchestrator: PristineVerificationEngine complete");
+        "NoveltyExpansionOrchestrator: PristineVerificationEngine complete — " +
+        std::to_string(std::count_if(all_findings.begin(), all_findings.end(),
+            [](const Finding& f){ return f.classification == Classification::FalsePositive; })) +
+        " findings suppressed by PVE");
 
-    // Wire BackCheckEngine â structural back-checks on survivors
+    // Wire BackCheckEngine — structural back-checks on survivors
     {
         BackCheckEngine bce;
         PatternLibrary bce_pl;
@@ -21224,21 +21320,34 @@ void NoveltyExpansionOrchestrator::run(const std::vector<Release>& releases, std
         for (auto& f : all_findings) {
             if (f.classification == Classification::FalsePositive) continue;
             std::string raw;
-            for (const auto& rel : releases) {
-                for (const auto& tu : rel.translation_units) {
-                    if (tu.file_path == f.file) { raw = tu.raw_content; break; }
+            // Look up in releases_ first
+            for (const auto& [rel_key, rel_info] : releases_) {
+                auto it = rel_info.translation_units.find(f.file);
+                if (it != rel_info.translation_units.end() && it->second) {
+                    raw = it->second->raw_content;
+                    break;
                 }
-                if (!raw.empty()) break;
+            }
+            // Fall back to passed-in releases
+            if (raw.empty()) {
+                for (const auto& rel : releases) {
+                    for (const auto& tu : rel.translation_units) {
+                        if (tu.file_path == f.file) { raw = tu.raw_content; break; }
+                    }
+                    if (!raw.empty()) break;
+                }
             }
             bool suppress = bce.back_check(f, raw, bce_pl);
             if (suppress) {
                 f.classification = Classification::FalsePositive;
                 f.evidence += " [Suppressed by BackCheckEngine]";
+                Logger::instance().info("BackCheckEngine suppressed: " +
+                    std::to_string(f.finding_id) + " — " + f.file);
             }
         }
     }
 
-    // IMP14: Assign review_tier before novelty classification
+        // IMP14: Assign review_tier before novelty classification
     for (auto& finding : all_findings) {
         if (finding.severity == Severity::Critical) finding.review_tier = "immediate";
         else if (finding.severity == Severity::High) finding.review_tier = "scheduled";
